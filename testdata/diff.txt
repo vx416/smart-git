@@ -1,0 +1,57 @@
+diff --git a/internal/app/grpc.go b/internal/app/grpc.go
+index 24de2c9c..690a2a2a 100644
+--- a/internal/app/grpc.go
++++ b/internal/app/grpc.go
+@@ -4,6 +4,7 @@ import (
+ 	"context"
+ 	"log"
+ 	"net"
++	"net/http"
+ 	"strings"
+ 
+ 	"github.com/sirupsen/logrus"
+@@ -165,6 +166,11 @@ func runGrpcServer(lc fx.Lifecycle, svc service.Service) error {
+ 	pbAccount.RegisterIncomeStatementServiceServer(grpcServer, incomeStatementSvc)
+ 	logger.Logger().Info("register account service done")
+ 
++	healthCheckServer, err := observability.NewHTTPHealthCheckerServerForGrpcHealthChecker(":9527", "/health", port)
++	if err != nil {
++		logger.Logger().Fatalf("failed to start http health checker: %v", err)
++		return err
++	}
+ 	lc.Append(fx.Hook{
+ 		OnStart: func(ctx context.Context) error {
+ 			go func() {
+@@ -184,8 +190,8 @@ func runGrpcServer(lc fx.Lifecycle, svc service.Service) error {
+ 				}
+ 			}()
+ 			go func() {
+-				err = middleware.NewHttpHealthChecker(":9527", "/health", port)
+-				if err != nil {
++				err = healthCheckServer.ListenAndServe()
++				if err != nil && !errors.Is(err, http.ErrServerClosed) {
+ 					logger.Logger().Fatalf("failed to start http health checker: %v", err)
+ 				} else {
+ 					logger.Logger().Info("http health checker started")
+@@ -201,6 +207,10 @@ func runGrpcServer(lc fx.Lifecycle, svc service.Service) error {
+ 			return nil
+ 		},
+ 		OnStop: func(context.Context) error {
++			err = healthCheckServer.Shutdown(ctx)
++			if err != nil {
++				logger.Logger().Errorf("healthCheckServer Shutdown error, err: %+v", err)
++			}
+ 			if traceProvider != nil {
+ 				err = traceProvider.Shutdown(ctx)
+ 				if err != nil {
+diff --git a/internal/errcode/errcode.go b/internal/errcode/errcode.go
+index 166d00ce..728a8706 100644
+--- a/internal/errcode/errcode.go
++++ b/internal/errcode/errcode.go
+@@ -69,6 +69,7 @@ var (
+ 	InvalidChildOrderMaxPrice                                                  = grpcerrors.NewErrCode(codes.InvalidArgument, 422046, "error.invalid_child_order_max_price")
+ 	InvalidChildOrderPrice                                                     = grpcerrors.NewErrCode(codes.InvalidArgument, 422047, "error.invalid_child_order_price")
+ 	InvalidChildOrderPriceLimit                                                = grpcerrors.NewErrCode(codes.InvalidArgument, 422048, "error.invalid_child_order_price_limit")
++	InvalidOrderIDsQueryCount                                                  = grpcerrors.NewErrCode(codes.InvalidArgument, 422050, "error.invalid_order_ids_query_count")
+ 	UserAccountInDebtErr                                                       = grpcerrors.NewErrCode(codes.InvalidArgument, 422049, "error.user_account_in_debt")
+ )

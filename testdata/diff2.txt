@@ -1,0 +1,2172 @@
+diff --git a/cmd/boot/check.go b/cmd/boot/check.go
+deleted file mode 100644
+index 2b2ada70..00000000
+--- a/cmd/boot/check.go
++++ /dev/null
+@@ -1,66 +0,0 @@
+-package boot
+-
+-import (
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/db"
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/kafka"
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/logger"
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/redis"
+-)
+-
+-// CheckRedis func
+-func CheckRedis() {
+-	log := logger.Logger()
+-	if redis := redis.GetClient(); redis != nil {
+-		if ping := redis.Ping(); ping.Err() != nil {
+-			log.Panicf("Redis: %v", ping.Err())
+-		} else {
+-			log.Infof("[OK] PING Redis return %v", ping.Val())
+-		}
+-	} else {
+-		log.Panic("Redis not found")
+-	}
+-}
+-
+-// CheckDB func
+-func CheckDB() {
+-	log := logger.Logger()
+-
+-	err := db.GetConn().RawQuery("SELECT 1;").Exec()
+-	if err != nil {
+-		log.Panic(err)
+-	}
+-	err = db.GetConnSlave().RawQuery("SELECT 1;").Exec()
+-	if err != nil {
+-		log.Panic(err)
+-	}
+-
+-	err = db.GetConnSqlx().Ping()
+-	if err != nil {
+-		log.Panic(err)
+-	}
+-	err = db.GetConnSlaveSqlx().Ping()
+-	if err != nil {
+-		log.Panic(err)
+-	}
+-	log.Info("[OK] MySQL connected")
+-}
+-
+-// CheckKafka func
+-func CheckKafka() {
+-	log := logger.Logger()
+-	client := kafka.GetClient()
+-
+-	if client != nil {
+-		defer client.Close()
+-
+-		for _, broker := range client.Brokers() {
+-			if _, err := broker.Connected(); err != nil {
+-				log.Errorf("Producer Broker#%v %v: %v", broker.ID(), broker.Addr(), err)
+-			}
+-
+-			log.Infof("[OK] Producer: Broker#%v %v", broker.ID(), broker.Addr())
+-		}
+-	} else {
+-		log.Panic("Producer not found")
+-	}
+-}
+diff --git a/cmd/boot/check_test.go b/cmd/boot/check_test.go
+deleted file mode 100644
+index e86c6b30..00000000
+--- a/cmd/boot/check_test.go
++++ /dev/null
+@@ -1,9 +0,0 @@
+-package boot
+-
+-// func (su *BootSuite) TestCheck() {
+-// 	su.Require().NotPanics(func() {
+-// 		CheckDB()
+-// 		CheckRedis()
+-// 		CheckKafka()
+-// 	})
+-// }
+diff --git a/cmd/boot/exchange_rate.go b/cmd/boot/exchange_rate.go
+deleted file mode 100644
+index db515543..00000000
+--- a/cmd/boot/exchange_rate.go
++++ /dev/null
+@@ -1,74 +0,0 @@
+-package boot
+-
+-import (
+-	"fmt"
+-
+-	"github.com/buger/jsonparser"
+-
+-	"github.com/Shopify/sarama"
+-
+-	"gitlab.link24hr.com/core2.0/natu/bitoenv"
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/cache"
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/config"
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/kafka"
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/logger"
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/redis"
+-)
+-
+-// InitExchangeRate func
+-func InitExchangeRate() error {
+-	exchangeRate := redis.GetClient().HGetAll(cache.RedisExchangeRateTW).Val()
+-
+-	if len(exchangeRate) == 0 {
+-		return fmt.Errorf("%s not found", cache.RedisExchangeRateTW)
+-	}
+-
+-	for k, v := range exchangeRate {
+-		cache.SetCache(fmt.Sprintf("%s:%s", cache.RedisExchangeRateTW, k), v)
+-	}
+-
+-	return nil
+-}
+-
+-// UpdateExchangeRate func
+-func UpdateExchangeRate() {
+-	log := logger.Logger()
+-	topic := "EXCHANGE_RATE_TWD"
+-
+-	offset, _ := kafka.GetClient().GetOffset(topic, 0, sarama.OffsetNewest)
+-
+-	if offset == 0 {
+-		if config.BitoEnvContains(bitoenv.EnvProduction, bitoenv.EnvRC) {
+-			log.Panicf("Topic %s: offset is 0, please check klink cron job or kafka message", topic)
+-		}
+-		log.Errorf("Topic %s: offset is 0, please check klink cron job or kafka message", topic)
+-	}
+-	log.Infof("Topic %s: #%d", topic, offset)
+-	consumer := kafka.GetOffsetConsumer(topic, offset-1)
+-	defer func() {
+-		if consumer != nil {
+-			if err := consumer.Close(); err != nil {
+-				log.Infof("close kafka UpdateExchangeRate consumer failed error: %+v", err)
+-				return
+-			}
+-		}
+-		log.Info("close kafka UpdateExchangeRate consumer done")
+-	}()
+-	for {
+-		select {
+-		case msg := <-consumer.Messages():
+-			log.Infof("Exchange rate updated: %s", string(msg.Value))
+-
+-			err := jsonparser.ObjectEach(msg.Value, func(key []byte, value []byte, _ jsonparser.ValueType, _ int) error {
+-				cache.SetCache(fmt.Sprintf("%s:%s", cache.RedisExchangeRateTW, string(key)), string(value))
+-
+-				return nil
+-			})
+-			if err != nil {
+-				log.Errorf("json parser parse object failed, err:%+v", err)
+-			}
+-		case err := <-consumer.Errors():
+-			log.Errorf("consumer err: %+v", err)
+-		}
+-	}
+-}
+diff --git a/cmd/boot/exchange_rate_test.go b/cmd/boot/exchange_rate_test.go
+deleted file mode 100644
+index 190492a7..00000000
+--- a/cmd/boot/exchange_rate_test.go
++++ /dev/null
+@@ -1,42 +0,0 @@
+-package boot
+-
+-// type BootSuite struct {
+-// 	test.TestSuite
+-// }
+-
+-// func TestBootSuite(t *testing.T) {
+-// 	suite.Run(t, new(BootSuite))
+-// }
+-
+-// func (su *BootSuite) SetupSuite() {
+-// 	su.TestSuite.SetupSuite()
+-// 	kafka.Init()
+-// }
+-
+-// func (su *BootSuite) TestFetchExchangeRate() {
+-// 	InitExchangeRate()
+-// 	su.NotNil(cache.GetExchangeRate("TWD"))
+-// 	su.NotNil(cache.GetExchangeRate("BITO"))
+-// 	su.NotNil(cache.GetExchangeRate("ETH"))
+-// 	su.NotNil(cache.GetExchangeRate("TWDd"))
+-// 	su.NotNil(cache.GetExchangeRate("LTC"))
+-// }
+-
+-// func (su *BootSuite) TestUpdateExchangeRate() {
+-// 	go UpdateExchangeRate()
+-// 	time.Sleep(1 * time.Second)
+-// }
+-
+-// func (su *BootSuite) TestProducer() {
+-// 	producer := kafka.GetProducer()
+-// 	defer producer.Close()
+-// 	_, _, err := producer.SendMessage(&sarama.ProducerMessage{
+-// 		Topic: "EXCHANGE_RATE_TWD",
+-// 		Value: sarama.StringEncoder("{\"BCH\":\"7788\",\"BITO\":\"35140562248\",\"BTC\":\"12453145917\",\"BTG\":\"1760374832\",\"CGP\":\"137884872\",\"ETH\":\"10374832663\",\"LTC\":\"3681392235\",\"MITH\":\"23427041\",\"PANDA\":\"167336010\",\"RPC\":\"97317590\",\"SDA\":\"702811\",\"TWD\":\"3346720\",\"TWDT\":\"97443955\",\"USDT\":\"100000000\",\"XEM\":\"97326720\"}"),
+-// 	})
+-// 	su.NoError(err)
+-// }
+-
+-// func (su *BootSuite) SetupTest() {
+-
+-// }
+diff --git a/cmd/boot/pair_watcher.go b/cmd/boot/pair_watcher.go
+deleted file mode 100644
+index 6ee4c6b8..00000000
+--- a/cmd/boot/pair_watcher.go
++++ /dev/null
+@@ -1,31 +0,0 @@
+-package boot
+-
+-import (
+-	"github.com/go-redis/redis/v7"
+-	"gitlab.link24hr.com/core2.0/absol"
+-	"gitlab.link24hr.com/core2.0/natu/pairwatcher"
+-	"gitlab.link24hr.com/core2.0/sunkern/internal/service/order/pause"
+-)
+-
+-func InitPairWatcher(client *redis.Client, logger *absol.Logger, done <-chan bool) {
+-	watcher := pairwatcher.NewPairPauseWatcher(client, logger, "sunkern")
+-
+-	pausedPairs, err := watcher.GetPausedPairs()
+-	if err != nil {
+-		logger.WithError(err).Panic("failed to get paused pair")
+-	}
+-
+-	for pair, _ := range pausedPairs {
+-		pause.AddPair(pair)
+-		logger.Info("[", pair, "] is paused")
+-	}
+-
+-	watcher.StartPauseWatcher(func(msg pairwatcher.WatcherMessage) {
+-		switch msg.Action {
+-		case pairwatcher.ActionStart:
+-			pause.DeletePair(msg.Pair)
+-		case pairwatcher.ActionStop:
+-			pause.AddPair(msg.Pair)
+-		}
+-	}, []string{}, done)
+-}
+diff --git a/cmd/sunkern.go b/cmd/sunkern.go
+deleted file mode 100644
+index 31b32baf..00000000
+--- a/cmd/sunkern.go
++++ /dev/null
+@@ -1,234 +0,0 @@
+-package main
+-
+-import (
+-	"context"
+-	"fmt"
+-	"net"
+-	"os"
+-	"os/signal"
+-	"strings"
+-	"syscall"
+-
+-	"gitlab.link24hr.com/core2.0/sunkern/sk"
+-
+-	"github.com/sirupsen/logrus"
+-	tracesdk "go.opentelemetry.io/otel/sdk/trace"
+-
+-	"github.com/spf13/viper"
+-	"gitlab.link24hr.com/core2.0/absol"
+-	pbAccount "gitlab.link24hr.com/core2.0/igglybuff/account"
+-	"gitlab.link24hr.com/core2.0/igglybuff/common"
+-	pbHistory "gitlab.link24hr.com/core2.0/igglybuff/history"
+-	pbOrder "gitlab.link24hr.com/core2.0/igglybuff/order"
+-	"gitlab.link24hr.com/core2.0/natu/middleware"
+-	"gitlab.link24hr.com/core2.0/natu/observability"
+-	"gitlab.link24hr.com/core2.0/sunkern/cmd/boot"
+-	"gitlab.link24hr.com/core2.0/sunkern/internal/repository"
+-	"gitlab.link24hr.com/core2.0/sunkern/internal/service/account"
+-	"gitlab.link24hr.com/core2.0/sunkern/internal/service/history"
+-	"gitlab.link24hr.com/core2.0/sunkern/internal/service/order"
+-	v31 "gitlab.link24hr.com/core2.0/sunkern/internal/service/order/v31"
+-	"gitlab.link24hr.com/core2.0/sunkern/internal/service/orderbook"
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/config"
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/i18n"
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/kafka"
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/logger"
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/redis"
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/util"
+-	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+-	"google.golang.org/grpc"
+-	"google.golang.org/grpc/reflection"
+-)
+-
+-var (
+-	Commit string
+-)
+-
+-// main deprecated
+-func main() {
+-	err := config.Init("config")
+-	if err != nil {
+-		panic(err)
+-	}
+-	err = config.InitInfra()
+-	if err != nil {
+-		panic(err)
+-	}
+-	logger.SetCommit(Commit)
+-	log := logger.Logger()
+-	config.Dump(log)
+-
+-	util.GrpcErrorHandler.I18N(func(locale, key string, args ...interface{}) string {
+-		return string(i18n.I18n().T(locale, key, args...))
+-	})
+-
+-	ctx := context.Background()
+-	var (
+-		traceProvider        *tracesdk.TracerProvider
+-		serviceName          = "sunkern"
+-		serviceEnv           = viper.GetString("deployment.environment")
+-		otelCollServerURL    = viper.GetString("otel.collector.url")
+-		otelCollInsecureMode = viper.GetBool("otel.collector.insecure.mode")
+-		otelCollSampleRate   = viper.GetFloat64("otel.collector.sample.rate")
+-		otelExporterDisable  = viper.GetBool("otel.exporter.disable")
+-		logLevel             = viper.GetString("logger.level")
+-	)
+-	if logLevel == logrus.TraceLevel.String() && otelCollServerURL != "" {
+-		traceProvider, err = observability.InitTracer(ctx, observability.TracerConfig{
+-			ComponentName:        strings.ToLower(serviceName + "-" + serviceEnv),
+-			OTELCollServerURL:    otelCollServerURL,
+-			OTELCollInsecureMode: otelCollInsecureMode,
+-			SampleRate:           otelCollSampleRate,
+-			ExporterRetryDisable: otelExporterDisable,
+-		})
+-		if err != nil {
+-			absol.GetLogger(ctx).Errorf("InitTracer error, err: %+v", err)
+-		}
+-		defer func() {
+-			if traceProvider != nil {
+-				if err = traceProvider.Shutdown(ctx); err != nil {
+-					absol.GetLogger(ctx).Errorf("traceProvider Shutdown error, err: %+v", err)
+-				}
+-			}
+-		}()
+-	}
+-
+-	// init otel metric
+-
+-	port := fmt.Sprintf(":%v", viper.GetInt("service.port"))
+-	i18n.I18n()
+-	boot.CheckRedis()
+-	boot.CheckDB()
+-	err = boot.InitExchangeRate() // Initialize for local testing
+-	if err != nil {
+-		panic(err)
+-	}
+-	if viper.GetString("deployment.environment") != "testing" {
+-		boot.CheckKafka()
+-		go boot.UpdateExchangeRate()
+-	}
+-	done := make(chan bool)
+-	defer close(done)
+-	boot.InitPairWatcher(redis.GetClient(), log, done)
+-
+-	lis, err := net.Listen("tcp", port)
+-	if err != nil {
+-		log.Fatalf("Failed to listen: %+v", err)
+-	}
+-	defer lis.Close()
+-
+-	// init repo with redis, local-cache and db dao
+-	repo, err := repository.NewRepo()
+-	if err != nil {
+-		log.Panicf("failed to init dao, err: %+v", err)
+-	}
+-	s := grpc.NewServer(
+-		grpc.MaxRecvMsgSize(100*1024*1024),
+-		grpc.ChainUnaryInterceptor(
+-			middleware.UnaryGrpcServerLogging(logger.Logger(), []string{"UserID", "UserId"}, map[string]bool{}),
+-			middleware.UnaryGrpcServerErrHandle(&util.GrpcErrorHandler),
+-			middleware.UnaryGrpcServerTimeout(viper.GetDuration("context.timeout")),
+-			middleware.UnaryGrpcServerRecover(2*1024),
+-			otelgrpc.UnaryServerInterceptor(
+-				otelgrpc.WithInterceptorFilter(func(ii *otelgrpc.InterceptorInfo) bool {
+-					switch ii.UnaryServerInfo.FullMethod {
+-					case "/common.HealthChecker/Health":
+-						return false
+-					}
+-					return true
+-				})),
+-		),
+-	)
+-	conn, _ := grpc.Dial(viper.GetString("stoplimit.host"), grpc.WithInsecure(), grpc.WithChainUnaryInterceptor(
+-		middleware.UnaryGrpcClientLogging([]string{"UserId", "UserID"}, viper.GetString("service.name")),
+-	))
+-	sloV3Client := pbOrder.NewStopLimitOrderV3Client(conn)
+-
+-	pbOrder.RegisterOrderBookServer(s, &orderbook.OrderBook{})
+-	producer := kafka.GetProducer()
+-	defer func() {
+-		if producer != nil {
+-			err = producer.Close()
+-			if err != nil {
+-				log.Errorf("close producer failed, err:%+v", err)
+-				return
+-			}
+-		}
+-		log.Info("close kafka producer done")
+-	}()
+-
+-	asynProducer := kafka.GetAsyncProducer()
+-	defer func() {
+-		if asynProducer != nil {
+-			err = asynProducer.Close()
+-			if err != nil {
+-				log.Errorf("close producer failed, err:%+v", err)
+-				return
+-			}
+-		}
+-		log.Info("close kafka producer done")
+-	}()
+-
+-	pbOrder.RegisterOrderServer(s, &order.Order{
+-		Producer:      producer,
+-		AsyncProducer: asynProducer,
+-	})
+-	oSvc := &order.OrderV3{
+-		Producer:      producer,
+-		AsyncProducer: asynProducer,
+-		SloV3Client:   sloV3Client,
+-		Repo:          repo,
+-		HealthCheckGrpc: middleware.HealthCheckGrpc{
+-			Logger: logger.Logger(),
+-		},
+-		HistoryClient: config.GetGrpc().AllHistorySvc,
+-	}
+-
+-	v31OrderSvc := v31.OrderSvc{
+-		Repo:          repo,
+-		AsyncProducer: asynProducer,
+-		Producer:      producer,
+-	}
+-	pbOrder.RegisterOrderV31Server(s, v31OrderSvc)
+-	pbOrder.RegisterOrderV3Server(s, oSvc)
+-	common.RegisterHealthCheckerServer(s, oSvc)
+-
+-	accountSvc := &account.Account{
+-		AccountRepository:             repo,
+-		AggregatedAccountRepository:   repo,
+-		UserIncomeStatementRepository: repo,
+-		GrpClient:                     config.GetGrpc(),
+-	}
+-
+-	pbAccount.RegisterBalanceServer(s, &account.Balance{})
+-	pbAccount.RegisterBalanceV3Server(s, &account.BalanceV3{})
+-	pbAccount.RegisterAccountServer(s, accountSvc)
+-
+-	pbHistory.RegisterOrderV3Server(s, &history.OrderV3{})
+-	pbHistory.RegisterCryptoV3Server(s, &history.CryptoV3{})
+-	pbHistory.RegisterTokenV3Server(s, &history.TokenV3{})
+-	reflection.Register(s)
+-
+-	go func() {
+-		log.Infof("Starting service on %v", port)
+-		log.Info("[gRPC] OrderBook started")
+-		log.Info("[gRPC] Order started")
+-		log.Info("[gRPC] Account started")
+-		log.Info("[gRPC] History/order started")
+-		log.Info("[gRPC] History/crypto started")
+-		log.Info("[gRPC] History/token started")
+-
+-		if err := s.Serve(lis); err != nil {
+-			log.Fatalf("Failed to serve: %v", err)
+-		}
+-	}()
+-
+-	go middleware.NewHttpHealthChecker(":9527", "/health", port)
+-
+-	sign := make(chan os.Signal, 1)
+-	signal.Notify(sign, syscall.SIGINT, syscall.SIGTERM)
+-	<-sign
+-	s.GracefulStop()
+-	sk.GracefulShutdownClientServices(ctx)
+-	log.Info("[gRPC]] Server shutdown")
+-}
+diff --git a/internal/app/consumer.go b/internal/app/consumer.go
+index a5987b10..87f15572 100644
+--- a/internal/app/consumer.go
++++ b/internal/app/consumer.go
+@@ -3,6 +3,7 @@ package app
+ import (
+ 	"context"
+ 	"fmt"
++	"net/http"
+ 	"strings"
+ 
+ 	"github.com/pkg/errors"
+@@ -76,14 +77,17 @@ func runConsumer(lc fx.Lifecycle, svc service.Service) error {
+ 		log.Warnf("consumer group worker count %d is greater than topic %s partition count %d, set consumer group worker count to %d", consumerGroupWorkerCnt, assetChangeTopic, assertChangeTopicPartitionCnt, assertChangeTopicPartitionCnt)
+ 		consumerGroupWorkerCnt = assertChangeTopicPartitionCnt
+ 	}
++	healthServer, err := observability.NewHealthCheckerServer(ctx, "", "")
++	if err != nil {
++		log.Fatalf("new health checker server failed: %v", err)
++	}
+ 
+ 	// asset change consumer
+ 	lc.Append(fx.Hook{
+ 		OnStart: func(ctx context.Context) error {
+ 			go func() {
+-				err := observability.RunHealthCheckerServer(ctx, "", "")
+-				if err != nil {
+-					// 如果 health checker server 啟動失敗，k8s pod 會 fail，所以這邊直接 panic，確保 health checker server 一定要啟動成功
++				err = healthServer.ListenAndServe()
++				if err != nil && !errors.Is(err, http.ErrServerClosed) {
+ 					absol.GetLogger(ctx).Fatalf("run health checker server failed: %v", err)
+ 				}
+ 			}()
+@@ -103,7 +107,16 @@ func runConsumer(lc fx.Lifecycle, svc service.Service) error {
+ 		},
+ 		OnStop: func(ctx context.Context) error {
+ 			absol.GetLogger(ctx).Info("start closing consumer runner")
+-			return consumerRunner.Close()
++			err := consumerRunner.Close()
++			if err != nil {
++				return errors.WithMessagef(err, "close consumer runner failed")
++			}
++			absol.GetLogger(ctx).Info("start shutting down health checker server")
++			err = healthServer.Shutdown(ctx)
++			if err != nil {
++				return errors.WithMessagef(err, "shutdown health checker server failed")
++			}
++			return nil
+ 		},
+ 	})
+ 
+diff --git a/internal/app/grpc.go b/internal/app/grpc.go
+index 24de2c9c..690a2a2a 100644
+--- a/internal/app/grpc.go
++++ b/internal/app/grpc.go
+@@ -4,6 +4,7 @@ import (
+ 	"context"
+ 	"log"
+ 	"net"
++	"net/http"
+ 	"strings"
+ 
+ 	"github.com/sirupsen/logrus"
+@@ -165,6 +166,11 @@ func runGrpcServer(lc fx.Lifecycle, svc service.Service) error {
+ 	pbAccount.RegisterIncomeStatementServiceServer(grpcServer, incomeStatementSvc)
+ 	logger.Logger().Info("register account service done")
+ 
++	healthCheckServer, err := observability.NewHTTPHealthCheckerServerForGrpcHealthChecker(":9527", "/health", port)
++	if err != nil {
++		logger.Logger().Fatalf("failed to start http health checker: %v", err)
++		return err
++	}
+ 	lc.Append(fx.Hook{
+ 		OnStart: func(ctx context.Context) error {
+ 			go func() {
+@@ -184,8 +190,8 @@ func runGrpcServer(lc fx.Lifecycle, svc service.Service) error {
+ 				}
+ 			}()
+ 			go func() {
+-				err = middleware.NewHttpHealthChecker(":9527", "/health", port)
+-				if err != nil {
++				err = healthCheckServer.ListenAndServe()
++				if err != nil && !errors.Is(err, http.ErrServerClosed) {
+ 					logger.Logger().Fatalf("failed to start http health checker: %v", err)
+ 				} else {
+ 					logger.Logger().Info("http health checker started")
+@@ -201,6 +207,10 @@ func runGrpcServer(lc fx.Lifecycle, svc service.Service) error {
+ 			return nil
+ 		},
+ 		OnStop: func(context.Context) error {
++			err = healthCheckServer.Shutdown(ctx)
++			if err != nil {
++				logger.Logger().Errorf("healthCheckServer Shutdown error, err: %+v", err)
++			}
+ 			if traceProvider != nil {
+ 				err = traceProvider.Shutdown(ctx)
+ 				if err != nil {
+diff --git a/internal/errcode/errcode.go b/internal/errcode/errcode.go
+index 166d00ce..728a8706 100644
+--- a/internal/errcode/errcode.go
++++ b/internal/errcode/errcode.go
+@@ -69,6 +69,7 @@ var (
+ 	InvalidChildOrderMaxPrice                                                  = grpcerrors.NewErrCode(codes.InvalidArgument, 422046, "error.invalid_child_order_max_price")
+ 	InvalidChildOrderPrice                                                     = grpcerrors.NewErrCode(codes.InvalidArgument, 422047, "error.invalid_child_order_price")
+ 	InvalidChildOrderPriceLimit                                                = grpcerrors.NewErrCode(codes.InvalidArgument, 422048, "error.invalid_child_order_price_limit")
++	InvalidOrderIDsQueryCount                                                  = grpcerrors.NewErrCode(codes.InvalidArgument, 422050, "error.invalid_order_ids_query_count")
+ 	UserAccountInDebtErr                                                       = grpcerrors.NewErrCode(codes.InvalidArgument, 422049, "error.user_account_in_debt")
+ )
+ 
+diff --git a/internal/model/income_statement.go b/internal/model/income_statement.go
+index a1b55538..b5955328 100644
+--- a/internal/model/income_statement.go
++++ b/internal/model/income_statement.go
+@@ -52,7 +52,7 @@ type UserIncomeStatementBO struct {
+ // 公式參考：https://www.vbkr.com/help/topic2-diluted-cost-price-and-average-purchase-price
+ // 更新平均買入成本的同時，也會更新 LastCalculatedRecord 與 LastCalculatedBalance
+ // params: input: incomeUnit: 更新收益單位, output: error
+-func (model *UserIncomeStatementBO) CalculateAvgBuyTwdSPrice(ctx context.Context, incomeUnit UpdateIncomeUnit) bool {
++func (model *UserIncomeStatementBO) CalculateAvgBuyTwdAndUsdSPrice(ctx context.Context, incomeUnit UpdateIncomeUnit) bool {
+ 	now := timeutil.NowInTaipei()
+ 	dataSource := strings.ToLower(incomeUnit.DataSourceTable)
+ 	lastCalculatedRecord := kmodel.LastCalculatedRecord{}
+@@ -85,7 +85,8 @@ func (model *UserIncomeStatementBO) CalculateAvgBuyTwdSPrice(ctx context.Context
+ 	// 新的平均買入成本 = 新的所有幣種價值 / 新的所有幣種數量，並無條件進位
+ 	newAvgBuyTwdSPrice := totalTwdSValue.Div(totalSAmount).Shift(decimalutil.SatoshiShift).RoundUp(0)
+ 	newAvgBuyUsdSPrice := totalUsdSValue.Div(totalSAmount).Shift(decimalutil.SatoshiShift).RoundUp(0)
+-	absol.GetLogger(ctx).WithUserID(model.UserID).Debugf("AVGPRICECAL: totalTwdSValue:%s, totalUsdSValue:%s, totalSAmount:%s, newAvgBuyTwdSPrice:%s", totalTwdSValue, totalUsdSValue, totalSAmount, decimalutil.DecimalToSatoshi(totalTwdSValue.Div(totalSAmount)))
++	absol.GetLogger(ctx).WithUserID(model.UserID).Debugf("CalculateAvgBuyTwdSPrice: totalTwdSValue(%s) / totalSAmount (%s) * 1e8 =  newAvgBuyTwdSPrice %s; CalculateAvgBuyUsdSPrice: totalUsdSValue(%s) / totalSAmount (%s) * 1e8 =  newAvgBuyUsdSPrice %s",
++		totalTwdSValue, totalSAmount, newAvgBuyTwdSPrice, totalUsdSValue, totalSAmount, newAvgBuyUsdSPrice)
+ 	model.AvgBuyTwdSPrice = newAvgBuyTwdSPrice
+ 	model.AvgBuyUsdSPrice = newAvgBuyUsdSPrice
+ 	model.BuySAmount = totalSAmount
+diff --git a/internal/model/order.go b/internal/model/order.go
+index 741a9074..18e5009a 100644
+--- a/internal/model/order.go
++++ b/internal/model/order.go
+@@ -308,11 +308,13 @@ type GetOrderV4Option struct {
+ }
+ 
+ type GetOrderOption struct {
+-	Base      string
+-	Quote     string
+-	OrderID   uint64 `sql:"col:id"`
+-	UserID    uint64 `sql:"col:user_id"`
+-	OrderType OrderType
++	Base        string
++	Quote       string
++	OrderID     uint64 `sql:"col:id"`
++	UserID      uint64 `sql:"col:user_id"`
++	OrderType   OrderType
++	AccountID   *uint64
++	AccountKind *uint8 // 0: spot, 1: margin
+ }
+ 
+ func (opt GetOrderOption) TableName() string {
+diff --git a/internal/repository/db/order_repo.go b/internal/repository/db/order_repo.go
+index 146599d9..95ec16d5 100644
+--- a/internal/repository/db/order_repo.go
++++ b/internal/repository/db/order_repo.go
+@@ -150,11 +150,16 @@ func (repo *Repository) GetOrderBy(ctx context.Context, opt model.GetOrderOption
+ 		fmt.Sprintf(`"%s" as base`, opt.Base),
+ 		fmt.Sprintf(`"%s" as quote`, opt.Quote),
+ 	)
+-
+ 	if opt.OrderType == model.StopLimitType {
+-		query.AndIn("order_type IN (?)", []string{model.StopLimitType.String(), model.StopProfitOCOStopLimitType.String(), model.StopLossOCOStopLimitType.String()}).And("order_type_ref_id = ?", opt.OrderID).And("user_id = ?", opt.UserID)
++		query = query.AndIn("order_type IN (?)", []string{model.StopLimitType.String(), model.StopProfitOCOStopLimitType.String(), model.StopLossOCOStopLimitType.String()}).And("order_type_ref_id = ?", opt.OrderID).And("user_id = ?", opt.UserID)
+ 	} else {
+-		query.Where(opt)
++		query = query.Where(opt)
++	}
++	if opt.AccountKind != nil {
++		query = query.And("wallet_kind = ?", *opt.AccountKind)
++	}
++	if opt.AccountID != nil {
++		query = query.And("wallet_id = ?", *opt.AccountID)
+ 	}
+ 
+ 	err := db.GetWith(ctx, order, query)
+diff --git a/internal/service/incomestatement/avg_cost_price_svc.go b/internal/service/incomestatement/avg_cost_price_svc.go
+index 6d8245d8..d68c0d11 100644
+--- a/internal/service/incomestatement/avg_cost_price_svc.go
++++ b/internal/service/incomestatement/avg_cost_price_svc.go
+@@ -201,7 +201,7 @@ func (svc IncomeStatementService) updateIncomeStatementWithMsgs(ctx context.Cont
+ 			}
+ 		} else if message.TotalAmount.IsPositive() {
+ 			// 如果 totalAmount 為正，則計算平均買入價
+-			ok := statementBO.CalculateAvgBuyTwdSPrice(ctx, model.UpdateIncomeUnit{
++			ok := statementBO.CalculateAvgBuyTwdAndUsdSPrice(ctx, model.UpdateIncomeUnit{
+ 				DataSourceTable: message.SourceTableName,
+ 				OrderID:         uint64(message.EndIndex),
+ 				SAmount:         decimalutil.DecimalToSatoshi(message.TotalAmount),
+diff --git a/internal/service/order/all_orders_v3.go b/internal/service/order/all_orders_v3.go
+index 3d54901c..8d95abb5 100644
+--- a/internal/service/order/all_orders_v3.go
++++ b/internal/service/order/all_orders_v3.go
+@@ -21,15 +21,14 @@ import (
+ 	"gitlab.link24hr.com/core2.0/natu/timeutil"
+ 	entity "gitlab.link24hr.com/core2.0/sunkern/internal/model"
+ 	"gitlab.link24hr.com/core2.0/sunkern/internal/service/helper"
+-
+ 	"gitlab.link24hr.com/core2.0/sunkern/pkg/db"
+ 	"google.golang.org/grpc/codes"
+ 	"google.golang.org/grpc/status"
+ )
+ 
+ const (
+-	_maxOrders   = 1000
+-	_maxDuration = 90 * 24 * time.Hour
++	maxOrdersQueryCnt = 1000
++	_maxDuration      = 90 * 24 * time.Hour
+ )
+ 
+ const (
+@@ -64,7 +63,7 @@ type AllOrdersRequest_V3Validator struct {
+ 	LowerBase       string
+ 	LowerQuote      string
+ 	ValidLimit      int32
+-	ValidOrderIDGte uint64
++	ValidOrderIDLte uint64
+ }
+ 
+ func (req *AllOrdersRequest_V3Validator) Validate(ctx context.Context) error {
+@@ -77,15 +76,22 @@ func (req *AllOrdersRequest_V3Validator) Validate(ctx context.Context) error {
+ 	locale := middleware.GetInDefault(ctx, middleware.LocaleGrpcKey, "zh-Tw")
+ 	rpcErr := config.GrpcErr.Locale(locale)
+ 
+-	req.ValidStartTime, req.ValidEndTime, err = timeutil.GetStartAndEndTime(req.StartTimestamp, req.EndTimestamp, _maxDuration)
+-	if err != nil {
+-		return rpcErr.WithMsgErrorCode(errcode.InvalidTimeStampRange, "timestamp range invalid, err:%+v", err)
++	// 如果沒有指定 OrderIDs, 則需要檢查 StartTimestamp, EndTimestamp
++	if len(req.OrderIDs) == 0 {
++		req.ValidStartTime, req.ValidEndTime, err = timeutil.GetStartAndEndTime(req.StartTimestamp, req.EndTimestamp, _maxDuration)
++		if err != nil {
++			return rpcErr.WithMsgErrorCode(errcode.InvalidTimeStampRange, "timestamp range invalid, err:%+v", err)
++		}
++	}
++	if len(req.OrderIDs) > maxOrdersQueryCnt {
++		return rpcErr.WithMsgErrorCode(errcode.InvalidOrderIDsQueryCount, "order ids count exceed limit %d", maxOrdersQueryCnt)
+ 	}
+ 
+ 	var (
+ 		stats statusAndIndex
+ 		ok    bool
+ 	)
++	// TODO: 把 status 改成 optional field 就可以用 nil 來判斷了
+ 	// api-gateway 打過來是 req.Status:-999, 代表用 statusKind 判斷
+ 	// Only allowed open orders case can ignore time limit, No include fetch all cases
+ 	isOnlyFetchOpenOrderCase := false
+@@ -122,7 +128,7 @@ func (req *AllOrdersRequest_V3Validator) Validate(ctx context.Context) error {
+ 	}
+ 
+ 	req.ValidLimit = req.Limit
+-	if req.Limit <= 0 || req.Limit > _maxOrders {
++	if req.Limit <= 0 || req.Limit > maxOrdersQueryCnt {
+ 		req.ValidLimit = 100
+ 	}
+ 
+@@ -137,8 +143,7 @@ func (req *AllOrdersRequest_V3Validator) Validate(ctx context.Context) error {
+ 			}
+ 		}
+ 	}
+-	req.ValidOrderIDGte = orderID
+-
++	req.ValidOrderIDLte = orderID
+ 	return nil
+ }
+ 
+@@ -166,6 +171,11 @@ func (o *OrderV3) AllOrders(ctx context.Context, req *order.AllOrdersRequest_V3)
+ 
+ 	// composite required where conditions
+ 	var params = []any{req.UserId}
++	// if ignore time limit, no need to pass startDec, endDec when orderIDs is not empty
++	// note: 之後如果加上只能查三個月內的訂單，這邊就沒辦法 ignore time limit 了
++	if len(validator.OrderIDs) > 0 {
++		validator.IgnoreTimeLimitEnable = true
++	}
+ 	if !validator.IgnoreTimeLimitEnable {
+ 		params = append(params, startDec, endDec)
+ 	}
+@@ -173,9 +183,13 @@ func (o *OrderV3) AllOrders(ctx context.Context, req *order.AllOrdersRequest_V3)
+ 	// composite optional where conditions
+ 	//PRO-28749 open api 拿歷史資料 id shift 問題修正
+ 	extraWhereSql := ""
+-	if validator.ValidOrderIDGte > 0 {
++	if validator.ValidOrderIDLte > 0 {
+ 		extraWhereSql += "AND id <= ? "
+-		params = append(params, validator.ValidOrderIDGte)
++		params = append(params, validator.ValidOrderIDLte)
++	}
++	if len(validator.OrderIDs) > 0 {
++		extraWhereSql += "AND id IN (?) "
++		params = append(params, validator.OrderIDs)
+ 	}
+ 	if req.ClientId > 0 {
+ 		extraWhereSql += "AND client_id = ? "
+@@ -196,14 +210,12 @@ func (o *OrderV3) AllOrders(ctx context.Context, req *order.AllOrdersRequest_V3)
+ 		sqlString = formatAllOrderSql(base, quote, stats.index, extraWhereSql, validator.IgnoreTimeLimitEnable)
+ 	}
+ 
+-	log.Debugf("%s \n %+v", sqlString, params)
+-	if err := db.GetConnSlave().RawQuery(sqlString, params...).All(&model); err != nil {
+-		// if error is force index not found, try to select agin without force index
++	if err := db.PopQueryAll(ctx, true, &model, sqlString, params...); err != nil {
++		// if error is force index not found, try to select again without force index
+ 		if me, ok := errors.Cause(err).(*mysql.MySQLError); ok && me.Number == 1176 { // index does not exist, try without index
+ 			log.WithError(err).Error("failed to query orders, index does not exists, will try without index")
+ 			sqlString = formatAllOrderSql(base, quote, "", extraWhereSql, validator.IgnoreTimeLimitEnable)
+-			if err := db.GetConnSlave().RawQuery(sqlString, params...).All(&model); err != nil {
+-				log.WithError(err).Errorf("%s \n %+v", sqlString, params)
++			if err := db.PopQueryAll(ctx, true, &model, sqlString, params...); err != nil {
+ 				return nil, rpcErr.WithMsgErrorCode(errcode.Internal, errcode.ErrorMsgPatternDB, "failed to query orders, index does not exists, will try without index: "+err.Error())
+ 			}
+ 		} else {
+diff --git a/internal/service/order/all_orders_v3_sql.go b/internal/service/order/all_orders_v3_sql.go
+index c34c75ff..8fc5d506 100644
+--- a/internal/service/order/all_orders_v3_sql.go
++++ b/internal/service/order/all_orders_v3_sql.go
+@@ -132,9 +132,10 @@ func formatUnionSql(base string, quote string, statuses []int, validator *AllOrd
+ 
+ 		// composite optional where conditions
+ 		extraWhereSql := ""
+-		if validator.ValidOrderIDGte > 0 {
+-			extraWhereSql += "AND id >= ? "
+-			params = append(params, validator.ValidOrderIDGte)
++		//PRO-28749 open api 拿歷史資料 id shift 問題修正
++		if validator.ValidOrderIDLte > 0 {
++			extraWhereSql += "AND id <= ? "
++			params = append(params, validator.ValidOrderIDLte)
+ 		}
+ 		if validator.ClientId > 0 {
+ 			extraWhereSql += "AND client_id = ?"
+diff --git a/internal/service/order/all_orders_v3_test.go b/internal/service/order/all_orders_v3_test.go
+index 1219a323..6b58706e 100644
+--- a/internal/service/order/all_orders_v3_test.go
++++ b/internal/service/order/all_orders_v3_test.go
+@@ -2,15 +2,14 @@ package order
+ 
+ import (
+ 	"context"
+-	"strconv"
+ 	"strings"
+ 	"testing"
+ 	"time"
+ 
+ 	"github.com/stretchr/testify/suite"
+-	"gitlab.link24hr.com/core2.0/sunkern/internal/model"
+ 
+ 	pbOrder "gitlab.link24hr.com/core2.0/igglybuff/order"
++	"gitlab.link24hr.com/core2.0/sunkern/internal/model"
+ )
+ 
+ func TestAllOrders(t *testing.T) {
+@@ -21,29 +20,52 @@ type AllOrdersSuite struct {
+ 	OrderV3Suite
+ }
+ 
+-func (su *AllOrdersSuite) TestAllOrders_Successful() {
++func (su *AllOrdersSuite) SetupTest() {
++	su.Require().NoError(su.BaseSuiteV2.SetDBTestData("testdata/history/orders.sql"), "set db test data")
++	su.Require().NoError(su.BaseSuiteV2.SetDBTestData("testdata/history/oco_orders.sql"), "set db test data")
++	su.ClearMockCalls()
++}
++
++func (su *AllOrdersSuite) Test_Successful_AllOrders_TestCases() {
+ 	tcs := []struct {
++		name     string
+ 		req      pbOrder.AllOrdersRequest_V3
+ 		orderLen int
+ 		hasErr   bool
+ 	}{
+ 		{
++			name: "query_all_open_orders",
+ 			req: pbOrder.AllOrdersRequest_V3{
+ 				Base: "BTC", Quote: "TWD", StatusKind: "OPEN", StartTimestamp: 1688119650000, EndTimestamp: 1688370045000, UserId: 425, Status: -999,
+ 			},
+ 			orderLen: 100,
+ 		},
+ 		{
++			name: "query_all_open_orders_limit_10",
+ 			req: pbOrder.AllOrdersRequest_V3{
+ 				Base: "BTC", Quote: "TWD", StatusKind: "OPEN", StartTimestamp: 1688119650000, EndTimestamp: 1688370045000, UserId: 425, Status: -999, Limit: 10,
+ 			},
+ 			orderLen: 10,
+ 		},
+ 		{
++			name: "query_order_with_order_ids",
+ 			req: pbOrder.AllOrdersRequest_V3{
+-				Base: "BTC", Quote: "TWD", StatusKind: "OPEN", StartTimestamp: 1688119650000, EndTimestamp: 1688370045000, UserId: 999, Status: -999,
++				Base: "BTC", Quote: "TWD", StatusKind: "ALL", UserId: 425, Status: -999, OrderIDs: []uint64{16132796, 16132838, 16132950},
+ 			},
+-			orderLen: 100,
++			orderLen: 3,
++		},
++		{
++			name: "query_open_orders_with_diff_pairs_and_limit200",
++			req: pbOrder.AllOrdersRequest_V3{
++				Base:                  "sol",
++				Quote:                 "twd",
++				UserId:                999,
++				Limit:                 200,
++				Status:                -999,
++				StatusKind:            _statusKindOpen,
++				IgnoreTimeLimitEnable: true,
++			},
++			orderLen: 2,
+ 		},
+ 	}
+ 
+@@ -51,7 +73,7 @@ func (su *AllOrdersSuite) TestAllOrders_Successful() {
+ 	defer cancel()
+ 	for i := range tcs {
+ 		tc := tcs[i]
+-		su.Run("allorder_"+strconv.Itoa(i), func() {
++		su.Run(tc.name, func() {
+ 			resp, err := su.AllOrders(ctx, &tc.req)
+ 			if tc.hasErr {
+ 				su.Error(err, "has error")
+@@ -59,7 +81,7 @@ func (su *AllOrdersSuite) TestAllOrders_Successful() {
+ 				su.NoError(err, "no error")
+ 				su.Len(resp.Orders, tc.orderLen)
+ 				if len(resp.Orders) == tc.orderLen {
+-					su.True(resp.Orders[0].CreatedTimestamp > resp.Orders[tc.orderLen-1].CreatedTimestamp, "pbOrder desc pbOrder")
++					su.True(resp.Orders[0].CreatedTimestamp >= resp.Orders[tc.orderLen-1].CreatedTimestamp, "pbOrder desc pbOrder")
+ 				} else if len(resp.Orders) > 2 {
+ 					su.True(resp.Orders[0].CreatedTimestamp >= resp.Orders[1].CreatedTimestamp, "pbOrder desc pbOrder")
+ 				}
+@@ -75,7 +97,7 @@ func (su *AllOrdersSuite) assertAllOrdersStruct(order *pbOrder.AllOrderInfo_V3,
+ 	su.NotEmpty(order.Id, "id empty")
+ 	su.NotEmpty(order.Pair, "pair empty")
+ 	su.NotEmpty(order.Type, "type empty")
+-	su.Truef(strings.ToLower(order.Action) == "sell" || strings.ToLower(order.Action) == "buy", "action %s invalid", order.Action)
++	su.Truef(strings.EqualFold(order.Action, "sell") || strings.EqualFold(order.Action, "buy"), "action %s invalid", order.Action)
+ 
+ 	if strings.EqualFold(statusKind, "OPEN") {
+ 		su.True(order.Status < 2, "status open invalid")
+@@ -86,8 +108,9 @@ func (su *AllOrdersSuite) assertAllOrdersStruct(order *pbOrder.AllOrderInfo_V3,
+ 	} else if strings.EqualFold(statusKind, "ALL") {
+ 		su.True(order.Status >= -1 && order.Status <= 6, "status all invalid")
+ 	}
+-
+-	su.True(order.CreatedTimestamp >= timestampGte && order.CreatedTimestamp <= timestampLte, "timestamp invalid")
++	if timestampGte != 0 && timestampLte != 0 {
++		su.True(order.CreatedTimestamp >= timestampGte && order.CreatedTimestamp <= timestampLte, "timestamp invalid")
++	}
+ 	su.True(order.UpdatedTimestamp >= order.CreatedTimestamp, "update timestamp invalid")
+ 	su.NotEmpty(order.Price, "price empty")
+ 	su.NotEmpty(order.OriginalAmount, "ori amount empty")
+@@ -103,26 +126,6 @@ func (su *AllOrdersSuite) assertAllOrdersStruct(order *pbOrder.AllOrderInfo_V3,
+ 	}
+ }
+ 
+-func (su *AllOrdersSuite) Test_Successful_AllOrders_IgnoreTimeLimit() {
+-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*1)
+-	defer cancel()
+-	// In eth_twd_orders table, user (id: 999) has 2 open orders for 3 years before, only allow fetch open order can ignore time limit
+-	req := pbOrder.AllOrdersRequest_V3{
+-		Base:                  "eth",
+-		Quote:                 "twd",
+-		UserId:                999,
+-		Limit:                 200,
+-		Status:                -999,
+-		StatusKind:            _statusKindOpen,
+-		IgnoreTimeLimitEnable: true,
+-	}
+-	res, err := su.AllOrders(ctx, &req)
+-	su.NoError(err)
+-	su.NotNil(res)
+-	su.Equal(2, len(res.Orders))
+-	su.T().Log("pbOrder size: ", len(res.Orders))
+-}
+-
+ func (su *AllOrdersSuite) Test_Successful_AllOrders_Strategy_Setting() {
+ 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute*1)
+ 	defer cancel()
+diff --git a/internal/service/order/cancel_test.go b/internal/service/order/cancel_test.go
+index e238b42a..160c059d 100644
+--- a/internal/service/order/cancel_test.go
++++ b/internal/service/order/cancel_test.go
+@@ -17,6 +17,10 @@ type CancelOrderSuite struct {
+ 	OrderV3Suite
+ }
+ 
++func (su *CancelOrderSuite) SetupTest() {
++	su.ClearMockCalls()
++}
++
+ func (s *CancelOrderSuite) Test_Successful_CancelAllOrders_WithPair() {
+ 	s.MockHistoryClient.On("ListOrdersFromCache", s.Ctx, &allhistory.ListOrdersFromCacheRequest{
+ 		UserID:           909,
+diff --git a/internal/service/order/get_test.go b/internal/service/order/get_test.go
+deleted file mode 100644
+index bb594b54..00000000
+--- a/internal/service/order/get_test.go
++++ /dev/null
+@@ -1,87 +0,0 @@
+-package order
+-
+-import (
+-	"context"
+-	"testing"
+-	"time"
+-
+-	"github.com/stretchr/testify/suite"
+-	"gitlab.link24hr.com/core2.0/igglybuff/order"
+-)
+-
+-func TestGetOrder(t *testing.T) {
+-	suite.Run(t, new(GetOrderSuite))
+-}
+-
+-type GetOrderSuite struct {
+-	OrderV3Suite
+-}
+-
+-func (su *GetOrderSuite) Test_Successful_Order_Get_V3_Order_Strategy_Setting() {
+-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+-	defer cancel()
+-
+-	// Case: This parent order's order strategy has 1 SL settings
+-	res, err := su.OrderV3.Get(ctx, &order.GetRequest_V3{
+-		UserId:  "999",
+-		Base:    "bito",
+-		Quote:   "twd",
+-		OrderId: "4",
+-	})
+-	su.NoError(err)
+-	su.NotNil(res)
+-	su.Empty(res.GetOrder().GetSelfOrderStrategySetting())
+-	su.Equal(1, len(res.GetOrder().GetGroupOrderStrategySettings()))
+-
+-	// Case: This parent order's order strategy has 2 SL settings
+-	res, err = su.OrderV3.Get(ctx, &order.GetRequest_V3{
+-		UserId:  "999",
+-		Base:    "bito",
+-		Quote:   "twd",
+-		OrderId: "1",
+-	})
+-	su.NoError(err)
+-	su.NotNil(res)
+-	su.Empty(res.GetOrder().GetSelfOrderStrategySetting())
+-	su.Equal(2, len(res.GetOrder().GetGroupOrderStrategySettings()))
+-
+-	// Case: This order is child order, Now feature design only needs 1 layer order strategy setting, no support multi layer settings.
+-	res, err = su.OrderV3.Get(ctx, &order.GetRequest_V3{
+-		UserId:  "999",
+-		Base:    "bito",
+-		Quote:   "twd",
+-		OrderId: "3",
+-	})
+-	su.NoError(err)
+-	su.NotNil(res)
+-	su.Empty(len(res.GetOrder().GetGroupOrderStrategySettings()))
+-	su.NotEmpty(res.GetOrder().GetSelfOrderStrategySetting())
+-
+-	// Case: This order has no strategy settings, just a limit/market order.
+-	res, err = su.OrderV3.Get(ctx, &order.GetRequest_V3{
+-		UserId:  "425",
+-		Base:    "bito",
+-		Quote:   "twd",
+-		OrderId: "18",
+-	})
+-	su.NoError(err)
+-	su.NotNil(res)
+-	su.Empty(len(res.GetOrder().GetGroupOrderStrategySettings()))
+-	su.Empty(res.GetOrder().GetSelfOrderStrategySetting())
+-}
+-
+-func (su *GetOrderSuite) Test_Failure_Order_Get_V3() {
+-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+-	defer cancel()
+-
+-	// Case: No exists order
+-	res, err := su.OrderV3.Get(ctx, &order.GetRequest_V3{
+-		UserId:  "999",
+-		Base:    "bito",
+-		Quote:   "twd",
+-		OrderId: "18",
+-	})
+-	su.Error(err)
+-	su.Nil(res)
+-
+-}
+diff --git a/internal/service/order/get_v3.go b/internal/service/order/get_v3.go
+index 38ce80fe..ab78c254 100644
+--- a/internal/service/order/get_v3.go
++++ b/internal/service/order/get_v3.go
+@@ -26,6 +26,12 @@ func (svc *OrderV3) Get(ctx context.Context, req *order.GetRequest_V3) (*order.G
+ 	quote := strings.ToLower(req.Quote)
+ 
+ 	userId, err := strconv.ParseInt(req.UserId, 10, 64)
++	accountID := req.AccountID
++	var accountKind *uint8
++	if req.BalanceKind != nil {
++		kind := uint8(*req.BalanceKind)
++		accountKind = &kind
++	}
+ 
+ 	if err != nil || userId <= 0 {
+ 		return nil, grpcErr.WrapfGrpcError(codes.InvalidArgument, 0, "Invalid user", "invalid userID(%d)", userId)
+@@ -41,11 +47,13 @@ func (svc *OrderV3) Get(ctx context.Context, req *order.GetRequest_V3) (*order.G
+ 	}
+ 
+ 	orderData, err := svc.Repo.GetOrderBy(ctx, entity.GetOrderOption{
+-		Base:      base,
+-		Quote:     quote,
+-		OrderID:   uint64(orderID),
+-		UserID:    uint64(userID),
+-		OrderType: entity.OrderType(req.OrderType),
++		Base:        base,
++		Quote:       quote,
++		OrderID:     uint64(orderID),
++		UserID:      uint64(userID),
++		OrderType:   entity.OrderType(req.OrderType),
++		AccountID:   accountID,
++		AccountKind: accountKind,
+ 	})
+ 	if err != nil {
+ 		if errors.Is(err, sql.ErrNoRows) {
+diff --git a/internal/service/order/get_v3_test.go b/internal/service/order/get_v3_test.go
+new file mode 100644
+index 00000000..8d066bd6
+--- /dev/null
++++ b/internal/service/order/get_v3_test.go
+@@ -0,0 +1,140 @@
++package order
++
++import (
++	"testing"
++
++	"github.com/stretchr/testify/suite"
++	pbOrder "gitlab.link24hr.com/core2.0/igglybuff/order"
++	"gitlab.link24hr.com/core2.0/natu/converter"
++	"gitlab.link24hr.com/core2.0/natu/grpcutil/grpcerrors"
++	"gitlab.link24hr.com/core2.0/sunkern/internal/errcode"
++	"gitlab.link24hr.com/core2.0/sunkern/pkg/util"
++)
++
++type GetOrderV3TestSuite struct {
++	OrderV3Suite
++}
++
++func TestGetOrderV3(t *testing.T) {
++	suite.Run(t, new(GetOrderV3TestSuite))
++}
++
++func (su *GetOrderV3TestSuite) SetupTest() {
++	su.Require().NoError(su.BaseSuiteV2.SetDBTestData("testdata/add_test_data.sql"))
++	su.ClearMockCalls()
++}
++
++type GetOrderV3TestCase struct {
++	Name              string
++	Description       string
++	Input             *pbOrder.GetRequest_V3
++	ExpectedErrorCode *grpcerrors.ErrCode
++	ExpectedOrderID   string
++	ExpectedOrderType string
++}
++
++var (
++	// GetSpotOrderV3TestCasesSuccess is a test case for get spot order success
++	GetSpotOrderV3TestCasesSuccess = GetOrderV3TestCase{
++		Name:        "GetSpotOrderV3TestCasesSuccess",
++		Description: "get spot order success",
++		Input: &pbOrder.GetRequest_V3{
++			UserId:    "999",
++			OrderId:   "1",
++			Base:      "ETH",
++			Quote:     "TWD",
++			OrderType: "LIMIT",
++		},
++		ExpectedErrorCode: nil,
++		ExpectedOrderID:   "1",
++		ExpectedOrderType: "LIMIT",
++	}
++
++	// GetMarginOrderV3TestCasesSuccess is a test case for get margin order success
++	GetMarginOrderV3TestCasesSuccess = GetOrderV3TestCase{
++		Name:        "GetMarginOrderV3TestCasesSuccess",
++		Description: "get margin order success",
++		Input: &pbOrder.GetRequest_V3{
++			UserId:      "909",
++			OrderId:     "7",
++			Base:        "ETH",
++			Quote:       "TWD",
++			OrderType:   "LIMIT",
++			BalanceKind: converter.Ptr(pbOrder.BalanceKind(5)),
++		},
++		ExpectedOrderID:   "7",
++		ExpectedOrderType: "LIMIT",
++	}
++
++	// GetSpotOrderV3TestCasesOrderNotExistFail is a test case for get spot order fail due to not existed
++	GetSpotOrderV3TestCasesOrderNotExistFail = GetOrderV3TestCase{
++		Name:        "GetSpotOrderV3TestCasesOrderNotExistFail",
++		Description: "get spot order fail, due to it is a margin order",
++		Input: &pbOrder.GetRequest_V3{
++			UserId:      "909",
++			OrderId:     "7",
++			Base:        "ETH",
++			Quote:       "TWD",
++			OrderType:   "LIMIT",
++			BalanceKind: converter.Ptr(pbOrder.BalanceKind(0)),
++		},
++		ExpectedErrorCode: &errcode.InvalidArgument,
++	}
++
++	// GetMarginOrderV3TestCasesOrderNotExistFail is a test case for get margin order fail due to not existed
++	GetMarginOrderV3TestCasesOrderNotExistFail = GetOrderV3TestCase{
++		Name:        "GetMarginOrderV3TestCasesOrderNotExistFail",
++		Description: "get margin order fail, due to it is a spot order",
++		Input: &pbOrder.GetRequest_V3{
++			UserId:    "999",
++			OrderId:   "1",
++			Base:      "ETH",
++			Quote:     "TWD",
++			OrderType: "LIMIT",
++		},
++		ExpectedErrorCode: &errcode.InvalidArgument,
++	}
++)
++
++func (tc GetOrderV3TestCase) assert(su *GetOrderV3TestSuite, resp *pbOrder.GetResponse_V3, err error) {
++	switch tc.Name {
++	case GetSpotOrderV3TestCasesSuccess.Name:
++		su.NotNil(resp)
++		su.NoError(err)
++		su.Equal(tc.ExpectedOrderID, resp.Order.Id)
++		su.Equal(tc.ExpectedOrderType, resp.Order.Type)
++	case GetSpotOrderV3TestCasesOrderNotExistFail.Name:
++		expectedError := util.GrpcErrorHandler.WrapfErrorCode(*tc.ExpectedErrorCode, "")
++		su.ErrorAsf(err, &expectedError, "expect error code %v, but got %v", expectedError, err)
++	}
++}
++
++func (su *GetOrderV3TestSuite) Test_Order_Get_V3_Happy_Path() {
++	var testCases = []GetOrderV3TestCase{
++		GetSpotOrderV3TestCasesSuccess,
++		GetMarginOrderV3TestCasesSuccess,
++	}
++
++	for _, tc := range testCases {
++		su.Run(tc.Name, func() {
++			su.SetupTest()
++			resp, err := su.OrderV3.Get(su.Ctx, tc.Input)
++			tc.assert(su, resp, err)
++		})
++	}
++}
++
++func (su *GetOrderV3TestSuite) Test_Order_Get_V3_Sad_Path() {
++	var testCases = []GetOrderV3TestCase{
++		GetSpotOrderV3TestCasesOrderNotExistFail,
++		GetMarginOrderV3TestCasesOrderNotExistFail,
++	}
++
++	for _, tc := range testCases {
++		su.Run(tc.Name, func() {
++			su.SetupTest()
++			resp, err := su.OrderV3.Get(su.Ctx, tc.Input)
++			tc.assert(su, resp, err)
++		})
++	}
++}
+diff --git a/internal/service/order/list_all.go b/internal/service/order/list_all.go
+deleted file mode 100644
+index 83c789b2..00000000
+--- a/internal/service/order/list_all.go
++++ /dev/null
+@@ -1,156 +0,0 @@
+-package order
+-
+-import (
+-	"context"
+-	"encoding/json"
+-	"fmt"
+-	"strconv"
+-	"strings"
+-	"sync"
+-	"time"
+-
+-	"gitlab.link24hr.com/core2.0/natu/grpcutil"
+-
+-	entity "gitlab.link24hr.com/core2.0/sunkern/internal/model"
+-	"gitlab.link24hr.com/core2.0/sunkern/internal/service/helper"
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/cache"
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/redis"
+-
+-	"gitlab.link24hr.com/core2.0/igglybuff/order"
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/logger"
+-	"google.golang.org/grpc/codes"
+-	"google.golang.org/grpc/status"
+-)
+-
+-// ListAllFromDB func
+-//
+-//	deprecated 待確 apigateway 那端都替換後就可移除
+-func (*Order) ListAllFromDB(ctx context.Context, req *order.ListAllRequest) (*order.OrderEntryResponse, error) {
+-	log := logger.Logger().
+-		WithEventID(grpcutil.GetCtxEventID(ctx)).
+-		WithField("func", "Order.ListAll()").
+-		WithField("userId", req.UserID)
+-
+-	defer helper.Recover(log)
+-
+-	defer func(begin time.Time) {
+-		log.WithField("input", fmt.Sprintf("{ %v}", req)).WithField("took", time.Since(begin).String()).Debug("Order.ListAll()")
+-	}(time.Now())
+-
+-	userID, err := strconv.ParseInt(req.UserID, 10, 64)
+-
+-	if err != nil || userID <= 0 {
+-		log.WithError(err).Info("Invalid user")
+-		return nil, status.Errorf(codes.InvalidArgument, "Invalid user")
+-	}
+-
+-	var res []*order.OrderEntry
+-	var wg sync.WaitGroup
+-	done := make(chan *order.OrderEntry, 2)
+-
+-	for pair := range cache.GetPairWithDecimalLimit() {
+-		base := strings.ToLower(strings.Split(pair, "_")[0])
+-		quote := strings.ToLower(strings.Split(pair, "_")[1])
+-
+-		wg.Add(1)
+-
+-		go func(base, quote string) {
+-			defer helper.Recover(log)
+-			defer wg.Done()
+-
+-			var res []*order.OrderInfo
+-			var ords []*entity.Order
+-
+-			if req.Open {
+-				ords, _ = listOpenOrder(base, quote, userID)
+-			} else {
+-				ords, _ = listHistoryOrder(base, quote, userID, -7)
+-			}
+-
+-			for _, ord := range ords {
+-				res = append(res, getOrderInfo(ord))
+-			}
+-
+-			if res != nil {
+-				done <- &order.OrderEntry{
+-					Key:   fmt.Sprintf("%s_%s", base, quote),
+-					Value: res,
+-				}
+-			}
+-		}(base, quote)
+-	}
+-
+-	go func() {
+-		wg.Wait()
+-		close(done)
+-	}()
+-
+-	for d := range done {
+-		select {
+-		case <-ctx.Done():
+-		default:
+-			res = append(res, d)
+-		}
+-	}
+-
+-	return &order.OrderEntryResponse{
+-		Orders: res,
+-	}, nil
+-}
+-
+-// ListAll func
+-func (*Order) ListAll(ctx context.Context, req *order.ListAllRequest) (*order.OrderEntryResponse, error) {
+-	log := logger.Logger().
+-		WithEventID(grpcutil.GetCtxEventID(ctx)).
+-		WithField("func", "Order.ListAll()").
+-		WithField("userId", req.UserID)
+-
+-	defer helper.Recover(log)
+-
+-	defer func(begin time.Time) {
+-		log.WithField("input", fmt.Sprintf("{ %v}", req)).WithField("took", time.Since(begin).String()).Debug("Order.ListAll()")
+-	}(time.Now())
+-
+-	userID, err := strconv.ParseInt(req.UserID, 10, 64)
+-
+-	if err != nil || userID <= 0 {
+-		log.WithError(err).Info("Invalid user")
+-		return nil, status.Errorf(codes.InvalidArgument, "Invalid user")
+-	}
+-
+-	isOpen := "OPEN"
+-
+-	if !req.Open {
+-		isOpen = "HIS"
+-	}
+-
+-	var res []*order.OrderEntry
+-
+-	redis := redis.GetClient2()
+-
+-	for k, v := range redis.HGetAll(fmt.Sprintf("ORDER:%s:%d", isOpen, userID)).Val() {
+-		var model []*entity.Order
+-		var info []*order.OrderInfo
+-
+-		if err := json.Unmarshal([]byte(v), &model); err != nil {
+-			log.Error(err)
+-		}
+-
+-		for _, m := range model {
+-			if m.OrderType == order.Type_LIMIT.String() || m.OrderType == order.Type_MARKET.String() {
+-				m.Base = strings.Split(k, "_")[0]
+-				m.Quote = strings.Split(k, "_")[1]
+-				info = append(info, getOrderInfo(m))
+-			}
+-		}
+-
+-		res = append(res, &order.OrderEntry{
+-			Key:   strings.ToLower(k),
+-			Value: info,
+-		})
+-	}
+-
+-	return &order.OrderEntryResponse{
+-		Orders: res,
+-	}, nil
+-}
+diff --git a/internal/service/order/list_all_v3.go b/internal/service/order/list_all_v3.go
+deleted file mode 100644
+index 2daab32e..00000000
+--- a/internal/service/order/list_all_v3.go
++++ /dev/null
+@@ -1,53 +0,0 @@
+-package order
+-
+-import (
+-	"context"
+-	"strconv"
+-
+-	"google.golang.org/grpc/codes"
+-	"google.golang.org/grpc/status"
+-
+-	"gitlab.link24hr.com/core2.0/igglybuff/order"
+-
+-	"gitlab.link24hr.com/core2.0/sunkern/internal/model"
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/logger"
+-)
+-
+-// ListAll should be deprecated, replaced by reggisas
+-// 待確認 apigateway 沒用到後就可以移除
+-func (o *OrderV3) ListAll(ctx context.Context, req *order.ListAllRequest_V3) (*order.OrderEntryResponse_V3, error) {
+-	var (
+-		log      = logger.Logger()
+-		funcName = "OrderV3.ListAll"
+-	)
+-
+-	// 驗證
+-	userID, err := strconv.ParseInt(req.UserId, 10, 64)
+-	if err != nil || userID <= 0 {
+-		log.Errorf("[%s] failed to parse userID, error: %s", funcName, err.Error())
+-		return nil, status.Errorf(codes.InvalidArgument, "Invalid user")
+-	}
+-
+-	// ignore query order type
+-	option := model.GetOrderV4Option{IgnoreOrderKind: model.IgnoreOrderKindOpen}
+-	if req.Open {
+-		option.IgnoreOrderKind = model.IgnoreOrderKindHistory
+-	}
+-
+-	jsonArray, err := o.getAllOrderV4FromCache(ctx, userID, funcName, option)
+-	if err != nil {
+-		log.Errorf("[%s] failed to getAllOrderV4FromCache userID: %d, error: %s", funcName, userID, err.Error())
+-		return nil, err
+-	}
+-
+-	res, pairs := o.convertOrderInfoV3ForV3(ctx, jsonArray, funcName)
+-
+-	log.Debugf("[%s] userID: %d, isOpen: %t, pairs: %s, len(res): %d, res: %+v", funcName, userID, req.Open, pairs, len(res), res)
+-
+-	// trigger to refresh order from tapulele
+-	o.publishRefreshAllOrderV4(ctx, req.UserId, funcName, pairs)
+-
+-	return &order.OrderEntryResponse_V3{
+-		Orders: res,
+-	}, nil
+-}
+diff --git a/internal/service/order/list_all_v4.go b/internal/service/order/list_all_v4.go
+deleted file mode 100644
+index 028963e6..00000000
+--- a/internal/service/order/list_all_v4.go
++++ /dev/null
+@@ -1,391 +0,0 @@
+-package order
+-
+-import (
+-	"context"
+-	"errors"
+-	"fmt"
+-	"strconv"
+-	"strings"
+-
+-	"github.com/Shopify/sarama"
+-	"github.com/go-redis/redis/v7"
+-	"github.com/shopspring/decimal"
+-	"github.com/spf13/viper"
+-	"google.golang.org/grpc/codes"
+-	"google.golang.org/grpc/status"
+-
+-	"gitlab.link24hr.com/core2.0/absol"
+-	"gitlab.link24hr.com/core2.0/igglybuff/order"
+-	"gitlab.link24hr.com/core2.0/natu/bitoenv"
+-	"gitlab.link24hr.com/core2.0/natu/converter"
+-	"gitlab.link24hr.com/core2.0/natu/decimalutil"
+-	"gitlab.link24hr.com/core2.0/natu/dko"
+-	"gitlab.link24hr.com/core2.0/natu/identity/userimid"
+-	"gitlab.link24hr.com/core2.0/sunkern/internal/model"
+-	entity "gitlab.link24hr.com/core2.0/sunkern/internal/model"
+-	pkgCache "gitlab.link24hr.com/core2.0/sunkern/pkg/cache"
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/logger"
+-	pkgRedis "gitlab.link24hr.com/core2.0/sunkern/pkg/redis"
+-	"gitlab.link24hr.com/core2.0/sunkern/sk"
+-)
+-
+-// ListAllOrderV4FromCache deprecated，待確認 apigateway 沒用到後就可以移除
+-func (o *OrderV3) ListAllOrderV4FromCache(ctx context.Context, req *order.ListAllRequest_V4) (*order.OrderEntryResponse_V4, error) {
+-	var (
+-		log      = logger.Logger()
+-		funcName = "OrderV3.ListAllOrderV4FromCache"
+-	)
+-
+-	userID, err := strconv.ParseInt(req.UserId, 10, 64)
+-	if err != nil || userID <= 0 {
+-		log.Errorf("[%s] failed to parse userID, error: %s", funcName, err.Error())
+-		return nil, status.Errorf(codes.InvalidArgument, "Invalid user")
+-	}
+-
+-	option := model.GetOrderV4Option{IgnoreOrderKind: model.IgnoreOrderKindNone}
+-	jsonArray, err := o.getAllOrderV4FromCache(ctx, userID, funcName, option)
+-	if err != nil {
+-		log.Errorf("[%s] failed to getAllOrderV4FromCache userID: %d, error: %s", funcName, userID, err.Error())
+-		return nil, err
+-	}
+-
+-	res, pairs := o.convertOrderInfoV3ForV4(ctx, jsonArray, funcName)
+-
+-	log.Debugf("[%s] userID: %d, pairs: %s, len(res): %d, res:%+v", funcName, userID, pairs, len(res), res)
+-
+-	// trigger to refresh order from tapulele
+-	o.publishRefreshAllOrderV4(ctx, req.UserId, funcName, pairs)
+-
+-	return &order.OrderEntryResponse_V4{
+-		Orders: res,
+-	}, nil
+-}
+-
+-func (o *OrderV3) publishRefreshAllOrderV4(ctx context.Context, userID, funcName string, pairs map[string]struct{}) {
+-	var (
+-		log                = logger.Logger()
+-		refreshOrderPrefix = viper.GetString("refresh.orders.key")
+-	)
+-
+-	if refreshOrderPrefix == "" {
+-		refreshOrderPrefix = sk.RefreshOrdersTextPrefix
+-	}
+-	key := fmt.Sprintf("%s:%s", refreshOrderPrefix, userID)
+-
+-	// refresh key 不過期, 若要 refresh 可以透過砍 key 來達到目的
+-	if ok, err := pkgRedis.GetClient2().SetNX(key, 1, 0).Result(); err != nil {
+-		log.Errorf("[%s] failed to set if not exist redis key, err: %+v", funcName, err)
+-		return
+-	} else if !ok {
+-		log.Debugf("[%s] redis key already exist", funcName)
+-		return
+-	}
+-
+-	if len(pairs) == 0 {
+-		publishByProducer(pkgCache.GetTradablePairs(), o.Producer, log, userID)
+-	} else {
+-		publishByProducer(pairs, o.Producer, log, userID)
+-	}
+-}
+-
+-func (o *OrderV3) convertOrderInfoV3ForV4(ctx context.Context, jsonArray []string, funcName string) ([]*order.OrderInfo_V3, map[string]struct{}) {
+-	var (
+-		log     = logger.Logger()
+-		pairMap = map[string]struct{}{}
+-	)
+-	var orderInfoV3 []*order.OrderInfo_V3
+-	for _, jsonOrderV4 := range jsonArray {
+-		tempUserOrderV4 := &dko.UserOrderV4{}
+-		err := converter.JsonUnmarshal([]byte(jsonOrderV4), tempUserOrderV4)
+-		if err != nil {
+-			log.Errorf("[%s] failed to JsonUnmarshal, err: %+v", funcName, err)
+-			continue
+-		}
+-		orderInfoV3 = append(orderInfoV3, convertDKOToOrderInfoV3(ctx, tempUserOrderV4))
+-		pairMap[strings.ToUpper(tempUserOrderV4.Pair)] = struct{}{}
+-	}
+-
+-	return orderInfoV3, pairMap
+-}
+-
+-func (o *OrderV3) convertOrderInfoV3ForV3(ctx context.Context, jsonArray []string, funcName string) ([]*order.OrderEntry_V3, map[string]struct{}) {
+-	var (
+-		log     = logger.Logger()
+-		pairMap = map[string]struct{}{}
+-		res     []*order.OrderEntry_V3
+-	)
+-	tempMapOrders := make(map[string][]*order.OrderInfo_V3)
+-	var orderInfoV3 []*order.OrderInfo_V3
+-	for _, jsonOrderV4 := range jsonArray {
+-		tempUserOrderV4 := &dko.UserOrderV4{}
+-		err := converter.JsonUnmarshal([]byte(jsonOrderV4), tempUserOrderV4)
+-		if err != nil {
+-			log.Errorf("[%s] failed to JsonUnmarshal, err: %+v", funcName, err)
+-			continue
+-		}
+-		orderInfoV3 = append(orderInfoV3, convertDKOToOrderInfoV3(ctx, tempUserOrderV4))
+-		pair := strings.ToUpper(tempUserOrderV4.Pair)
+-		pairMap[pair] = struct{}{}
+-		tempMapOrders[pair] = orderInfoV3
+-	}
+-
+-	for tempPair := range tempMapOrders {
+-		res = append(res, &order.OrderEntry_V3{
+-			Key:   strings.ToLower(tempPair),
+-			Value: tempMapOrders[tempPair],
+-		})
+-	}
+-
+-	return res, pairMap
+-}
+-
+-func (o *OrderV3) getAllOrderV4FromCache(ctx context.Context, userID int64, funcName string, option model.GetOrderV4Option) ([]string, error) {
+-	var (
+-		log   = logger.Logger()
+-		cache = pkgRedis.GetClient2()
+-	)
+-
+-	var redisKeys []string
+-	if option.IgnoreOrderKind == model.IgnoreOrderKindHistory {
+-		redisKeys = append(redisKeys, sk.OpenOrdersHashPrefix)
+-	} else if option.IgnoreOrderKind == model.IgnoreOrderKindOpen {
+-		redisKeys = append(redisKeys, sk.TradedOrdersHashPrefix, sk.DeletedOrdersHashPrefix)
+-	} else if option.IgnoreOrderKind == model.IgnoreOrderKindNone {
+-		redisKeys = append(redisKeys, sk.OpenOrdersHashPrefix, sk.TradedOrdersHashPrefix, sk.DeletedOrdersHashPrefix)
+-	}
+-
+-	commands, err := cache.Pipelined(func(piper redis.Pipeliner) error {
+-		for _, key := range redisKeys {
+-			if err := piper.ZRange(fmt.Sprintf("%s%d", key, userID), 0, -1).Err(); err != nil {
+-				log.Errorf("[%s] failed to ZRange, error: %s", funcName, err.Error())
+-				return err
+-			}
+-		}
+-
+-		return nil
+-	})
+-
+-	if err != nil {
+-		if errors.Is(err, redis.Nil) {
+-			// 有可能是第一張單, 所以 cache 為空的情境不回傳 err
+-			log.Warnf("[%s] empty data, userID: %d, error: %s", funcName, userID, err.Error())
+-		} else {
+-			log.Errorf("[%s] userID: %d, error: %s", funcName, userID, err.Error())
+-			return nil, err
+-		}
+-	} else if len(commands) != len(redisKeys) {
+-		customErr := errors.New("redis number of commands not correct")
+-		log.Errorf("[%s] userID:%d, error: %s", funcName, userID, customErr.Error())
+-		return nil, customErr
+-	}
+-
+-	var allOrderV4 []string
+-	for _, command := range commands {
+-		if cmd, ok := command.(*redis.StringSliceCmd); ok {
+-			orderV4, err := cmd.Result() // []string{json...json}
+-			if err != nil {
+-				log.Errorf("[%s] failed to cmd.Result, userID:%d, error: %s", funcName, userID, err.Error())
+-				return nil, err
+-			}
+-			allOrderV4 = append(allOrderV4, orderV4...)
+-		}
+-	}
+-
+-	return allOrderV4, nil
+-}
+-
+-func publishByProducer[T comparable](pairs map[string]T, producer sarama.SyncProducer, log *absol.Logger, userID string) {
+-	for pair := range pairs {
+-		base, quote, err := bitoenv.SplitPair(pair, true)
+-		if err != nil {
+-			log.Errorf("parsing pair failed, pair:%s err:%+v", pair, err)
+-			continue
+-		}
+-		log.Debugf("refresh order for userID:%s %s/%s", userID, base, quote)
+-		sendRefreshAllOrders(producer, userID, base, quote, log)
+-	}
+-}
+-
+-func convertDKOToOrderInfoV3(ctx context.Context, model *dko.UserOrderV4) *order.OrderInfo_V3 {
+-	var oriSAmount, tradeSAmount, sFee, avgSPrice, tradeCSAmount, tempSFee, tempCSFee, bitoSFee decimal.Decimal
+-	var price, total, avgPrice, lowerFeeSymbol, stopPrice, condition, parentOrderID string
+-	log := absol.GetLogger(ctx)
+-
+-	if len(model.TradeSAmount) > 0 {
+-		tradeSAmountDecimal, err := decimal.NewFromString(model.TradeSAmount)
+-		if err != nil {
+-			log.Errorf("[convertDKOToOrderInfoV3] failed to convert dko.UserOrderV4.TradeSAmount to OrderInfo_V3, %s, error: %+v", model.TradeSAmount, err.Error())
+-			return nil
+-		}
+-		tradeSAmount = tradeSAmountDecimal
+-	}
+-
+-	if len(model.OriSAmount) > 0 {
+-		oriSAmountDecimal, err := decimal.NewFromString(model.OriSAmount)
+-		if err != nil {
+-			log.Errorf("[convertDKOToOrderInfoV3] failed to convert dko.UserOrderV4.OriSAmount to OrderInfo_V3, %s, error: %+v", model.OriSAmount, err.Error())
+-			return nil
+-		}
+-		oriSAmount = oriSAmountDecimal
+-	}
+-
+-	if model.SPrice.Valid && len(model.SPrice.String) > 0 {
+-		sPriceDecimal, err := decimal.NewFromString(model.SPrice.String)
+-		if err != nil {
+-			log.Errorf("[convertDKOToOrderInfoV3] failed to convert dko.UserOrderV4.SPrice to OrderInfo_V3, %s, error: %+v", model.SPrice.String, err.Error())
+-			return nil
+-		}
+-		price = sPriceDecimal.Shift(-entity.SatoshiShift).String()
+-	}
+-
+-	if len(model.TradeCSAmount) > 0 {
+-		tradeCSAmountDecimal, err := decimal.NewFromString(model.TradeCSAmount)
+-		if err != nil {
+-			log.Errorf("[convertDKOToOrderInfoV3] failed to convert dko.UserOrderV4.TradeCSAmount to OrderInfo_V3, %s, error: %+v", model.TradeCSAmount, err.Error())
+-			return nil
+-		}
+-		tradeCSAmount = tradeCSAmountDecimal
+-		total = tradeCSAmountDecimal.Shift(-entity.SatoshiShift).String()
+-	}
+-
+-	if len(model.AvgSPrice) > 0 {
+-		avgSPriceDecimal, err := decimal.NewFromString(model.AvgSPrice)
+-		if err != nil {
+-			log.Errorf("[convertDKOToOrderInfoV3] failed to convert dko.UserOrderV4.AvgSPrice to OrderInfo_V3, %s, error: %+v", model.AvgSPrice, err.Error())
+-			return nil
+-		}
+-		avgSPrice = avgSPriceDecimal
+-	}
+-
+-	if tradeCSAmount.IsZero() && !tradeSAmount.IsZero() {
+-		cs := tradeCSAmount
+-		s := tradeSAmount
+-		avgPrice = cs.Div(s).Round(8).String()
+-	} else {
+-		avgPrice = decimalutil.SatoshiToDecimal(avgSPrice).String()
+-	}
+-
+-	if len(model.SFee) > 0 {
+-		sFeeDecimal, err := decimal.NewFromString(model.SFee)
+-		if err != nil {
+-			log.Errorf("[convertDKOToOrderInfoV3] failed to convert dko.UserOrderV4.SFee to OrderInfo_V3, %s, orderID: %d, error: %+v", model.SFee, model.OrderID, err.Error())
+-			return nil
+-		}
+-		tempSFee = sFeeDecimal
+-	}
+-
+-	lowerBase, lowerQuote, err := bitoenv.SplitPair(model.Pair, false)
+-	if err != nil {
+-		log.Errorf("[convertDKOToOrderInfoV3] failed to SplitPair, %s, error: %+v", model.Pair, err.Error())
+-		return nil
+-	}
+-
+-	if len(model.CSFee) > 0 {
+-		cSFeeDecimal, err := decimal.NewFromString(model.CSFee)
+-		if err != nil {
+-			log.Errorf("[convertDKOToOrderInfoV3] failed to convert dko.UserOrderV4.CSFee to OrderInfo_V3, %s error: %+v", model.CSFee, err.Error())
+-			return nil
+-		}
+-		tempCSFee = cSFeeDecimal
+-	}
+-
+-	if len(model.BitoSFee) > 0 {
+-		bitoSFeeDecimal, err := decimal.NewFromString(model.BitoSFee)
+-		if err != nil {
+-			log.Errorf("[convertDKOToOrderInfoV3] failed to convert dko.UserOrderV4.BitoSFee to OrderInfo_V3, %s, error: %+v", model.BitoSFee, err.Error())
+-			return nil
+-		}
+-		bitoSFee = bitoSFeeDecimal
+-	}
+-
+-	if model.IsBuy == 1 {
+-		sFee = tempSFee
+-		lowerFeeSymbol = lowerBase
+-	} else {
+-		sFee = tempCSFee
+-		lowerFeeSymbol = lowerQuote
+-	}
+-
+-	if sFee.IsZero() && !bitoSFee.IsZero() {
+-		lowerFeeSymbol = "bito"
+-	}
+-
+-	if model.IsMarket == 1 && model.IsBuy == 1 {
+-		if len(model.OriCSAmount) > 0 {
+-			oriCSAmountDecimal, err := decimal.NewFromString(model.OriCSAmount)
+-			if err != nil {
+-				log.Errorf("[convertDKOToOrderInfoV3] failed to convert dko.UserOrderV4.OriCSAmount to OrderInfo_V3, %s, error: %+v", model.OriCSAmount, err.Error())
+-				return nil
+-			}
+-			oriSAmount = oriCSAmountDecimal
+-		}
+-	}
+-
+-	timestamp := model.UpdatedAti
+-	createdTimestamp := model.CreatedAti
+-	if timestamp == 0 {
+-		timestamp = createdTimestamp
+-	}
+-
+-	if model.StopSPrice.Valid && len(model.StopSPrice.String) > 0 {
+-		d, err := decimal.NewFromString(model.StopSPrice.String)
+-		if err != nil {
+-			log.Errorf("[convertDKOToOrderInfoV3] failed to convert dko.UserOrderV4.StopSPrice to OrderInfo_V3, %s, error: %+v", model.StopSPrice.String, err.Error())
+-			return nil
+-		}
+-		stopPrice = d.Shift(-entity.SatoshiShift).String()
+-	}
+-
+-	if model.TriggerCondition.Valid && len(model.TriggerCondition.String) > 0 {
+-		condition = model.TriggerCondition.String
+-	}
+-
+-	// make all cancel to be 4
+-	if model.Status == 5 {
+-		model.Status = 4
+-	}
+-
+-	tempID := model.ID
+-	if model.OrderTypeRefID.Valid && model.OrderTypeRefID.Int64 != 0 {
+-		tempID = uint64(model.OrderTypeRefID.Int64)
+-	}
+-
+-	if model.TimeInForce == "" {
+-		model.TimeInForce = "GTC"
+-	}
+-
+-	stopLossesPricePercentage := model.StopLossesPricePercentage
+-	stopProfitPricePercentage := model.StopProfitPricePercentage
+-
+-	if model.ParentOrderID.Valid && model.ParentOrderID.Int64 != 0 {
+-		parentOrderID = strconv.FormatInt(model.ParentOrderID.Int64, 10)
+-	}
+-
+-	return &order.OrderInfo_V3{
+-		Id:                        strconv.FormatUint(tempID, 10),
+-		Seq:                       fmt.Sprintf("%s%s%s", strings.ToUpper(lowerBase), strings.ToUpper(lowerQuote), userimid.EncodeId(strconv.FormatUint(model.OrderID, 10))),
+-		Pair:                      model.Pair,
+-		Price:                     price,
+-		AvgExecutionPrice:         avgPrice,
+-		Action:                    order.IsBuy_name[model.IsBuy],
+-		Type:                      model.OrderType,
+-		Timestamp:                 timestamp,
+-		Status:                    int32(model.Status),
+-		OriginalAmount:            oriSAmount.Shift(-entity.SatoshiShift).String(),
+-		RemainingAmount:           oriSAmount.Sub(tradeSAmount).Shift(-entity.SatoshiShift).String(),
+-		ExecutedAmount:            tradeSAmount.Shift(-entity.SatoshiShift).String(),
+-		Fee:                       sFee.Shift(-entity.SatoshiShift).String(),
+-		FeeSymbol:                 lowerFeeSymbol,
+-		BitoFee:                   bitoSFee.Shift(-entity.SatoshiShift).String(),
+-		Total:                     total,
+-		Condition:                 condition,
+-		StopPrice:                 stopPrice,
+-		TimeInForce:               model.TimeInForce,
+-		UpdatedTimestamp:          timestamp,
+-		CreatedTimestamp:          createdTimestamp,
+-		ClientId:                  model.ClientID.Int64,
+-		StopLossesPricePercentage: stopLossesPricePercentage,
+-		StopProfitPricePercentage: stopProfitPricePercentage,
+-		ParentID:                  parentOrderID,
+-	}
+-}
+diff --git a/internal/service/order/list_history.go b/internal/service/order/list_history.go
+deleted file mode 100644
+index baa73e86..00000000
+--- a/internal/service/order/list_history.go
++++ /dev/null
+@@ -1,87 +0,0 @@
+-package order
+-
+-import (
+-	"context"
+-	"fmt"
+-	"strconv"
+-	"strings"
+-	"sync"
+-	"time"
+-
+-	"gitlab.link24hr.com/core2.0/igglybuff/order"
+-	"gitlab.link24hr.com/core2.0/natu/grpcutil"
+-	"gitlab.link24hr.com/core2.0/sunkern/internal/service/helper"
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/cache"
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/logger"
+-	"google.golang.org/grpc/codes"
+-	"google.golang.org/grpc/status"
+-)
+-
+-// ListHistory func
+-// deprecated 改用 OrderV3.AllOrders
+-func (*Order) ListHistory(ctx context.Context, req *order.ListHistoryRequest) (*order.OrderEntryResponse, error) {
+-	log := logger.Logger().
+-		WithEventID(grpcutil.GetCtxEventID(ctx)).
+-		WithField("func", "Order.ListHistory()").
+-		WithField("userId", req.UserID)
+-
+-	defer helper.Recover(log)
+-
+-	defer func(begin time.Time) {
+-		log.WithField("input", fmt.Sprintf("{ %v}", req)).WithField("took", time.Since(begin).String()).Debug("Order.ListHistory()")
+-	}(time.Now())
+-
+-	userID, err := strconv.ParseInt(req.UserID, 10, 64)
+-
+-	if err != nil || userID <= 0 {
+-		log.WithError(err).Info("invalid user")
+-		return nil, status.Errorf(codes.InvalidArgument, "Invalid user")
+-	}
+-
+-	var res []*order.OrderEntry
+-	var wg sync.WaitGroup
+-	done := make(chan *order.OrderEntry, 2)
+-
+-	for pair := range cache.GetPairWithDecimalLimit() {
+-		base := strings.ToLower(strings.Split(pair, "_")[0])
+-		quote := strings.ToLower(strings.Split(pair, "_")[1])
+-
+-		wg.Add(1)
+-
+-		go func(base, quote string) {
+-			defer helper.Recover(log)
+-			defer wg.Done()
+-
+-			var res []*order.OrderInfo
+-			ords, _ := listHistoryOrder(base, quote, userID, -7)
+-
+-			for _, ord := range ords {
+-				res = append(res, getOrderInfo(ord))
+-			}
+-
+-			if res != nil {
+-				done <- &order.OrderEntry{
+-					Key:   fmt.Sprintf("%s_%s", base, quote),
+-					Value: res,
+-				}
+-			}
+-		}(base, quote)
+-	}
+-
+-	go func() {
+-		wg.Wait()
+-		close(done)
+-	}()
+-
+-	for d := range done {
+-		select {
+-		case <-ctx.Done():
+-		default:
+-			res = append(res, d)
+-		}
+-	}
+-
+-	return &order.OrderEntryResponse{
+-		Orders: res,
+-	}, nil
+-}
+diff --git a/internal/service/order/list_history_v3.go b/internal/service/order/list_history_v3.go
+deleted file mode 100644
+index 4740ce2e..00000000
+--- a/internal/service/order/list_history_v3.go
++++ /dev/null
+@@ -1,111 +0,0 @@
+-package order
+-
+-import (
+-	"context"
+-	"fmt"
+-	"strconv"
+-	"strings"
+-	"sync"
+-	"time"
+-
+-	entity "gitlab.link24hr.com/core2.0/sunkern/internal/model"
+-
+-	"gitlab.link24hr.com/core2.0/igglybuff/order"
+-	"gitlab.link24hr.com/core2.0/natu/grpcutil"
+-	"gitlab.link24hr.com/core2.0/sunkern/internal/service/helper"
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/cache"
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/logger"
+-	"google.golang.org/grpc/codes"
+-	"google.golang.org/grpc/status"
+-)
+-
+-// ListHistory func
+-// deprecated 改用 OrderV3.AllOrders
+-func (ord *OrderV3) ListHistory(ctx context.Context, req *order.ListHistoryRequest_V3) (*order.OrderEntryResponse_V3, error) {
+-	log := logger.Logger().
+-		WithEventID(grpcutil.GetCtxEventID(ctx)).
+-		WithField("func", "OrderV3.ListHistory()").
+-		WithField("userId", req.UserId)
+-
+-	defer helper.Recover(log)
+-
+-	defer func(begin time.Time) {
+-		log.WithField("input", fmt.Sprintf("{ %v}", req)).WithField("took", time.Since(begin).String()).Debug("OrderV3.ListHistory()")
+-	}(time.Now())
+-
+-	userID, err := strconv.ParseInt(req.UserId, 10, 64)
+-
+-	if err != nil || userID <= 0 {
+-		log.Info("Invalid user")
+-		return nil, status.Errorf(codes.InvalidArgument, "Invalid user")
+-	}
+-
+-	var res []*order.OrderEntry_V3
+-	var wg sync.WaitGroup
+-	done := make(chan *order.OrderEntry_V3, 2)
+-
+-	for pair := range cache.GetPairWithDecimalLimit() {
+-		base := strings.ToLower(strings.Split(pair, "_")[0])
+-		quote := strings.ToLower(strings.Split(pair, "_")[1])
+-
+-		wg.Add(1)
+-
+-		go func(base, quote string) {
+-			log.Info("base: ", base, ", quote: ", quote)
+-			defer helper.Recover(log)
+-			defer wg.Done()
+-
+-			var res []*order.OrderInfo_V3
+-			ords, _ := listHistoryOrderV3(base, quote, userID, -5)
+-
+-			orderIDs := make([]string, len(ords))
+-			for idx, o := range ords {
+-				orderIDs[idx] = strconv.FormatInt(o.OrderID, 10)
+-			}
+-			// map[orderID] ordersStrategySettings struct
+-			ordersStrategySettings := map[string]entity.OrderStrategySettingResult{}
+-			if len(orderIDs) > 0 {
+-				ordersStrategySettings, err = ord.Repo.ListOrderStrategySettingsByPairOrders(ctx, entity.ListOrderStrategySettingsByMultiOrdersOpts{
+-					Base:         base,
+-					Quote:        quote,
+-					UserID:       uint64(userID),
+-					OrderIDs:     orderIDs,
+-					StrategyKind: entity.OrderStrategyKindOCO,
+-					SortBy:       "ASC",
+-				})
+-				if err != nil {
+-					log.WithError(err).Errorf("failed to list order strategy settings by pair order ids: %v, err: %v", orderIDs, err)
+-				}
+-			}
+-
+-			for _, o := range ords {
+-				orderIDString := strconv.FormatInt(o.OrderID, 10)
+-				res = append(res, getOrderInfoV3(o, ordersStrategySettings[orderIDString]))
+-			}
+-
+-			if res != nil {
+-				done <- &order.OrderEntry_V3{
+-					Key:   fmt.Sprintf("%s_%s", base, quote),
+-					Value: res,
+-				}
+-			}
+-		}(base, quote)
+-	}
+-
+-	go func() {
+-		wg.Wait()
+-		close(done)
+-	}()
+-
+-	for d := range done {
+-		select {
+-		case <-ctx.Done():
+-		default:
+-			res = append(res, d)
+-		}
+-	}
+-
+-	return &order.OrderEntryResponse_V3{
+-		Orders: res,
+-	}, nil
+-}
+diff --git a/internal/service/order/list_trade_test.go b/internal/service/order/list_trade_test.go
+index 17d1541b..838e1f35 100644
+--- a/internal/service/order/list_trade_test.go
++++ b/internal/service/order/list_trade_test.go
+@@ -15,6 +15,11 @@ type ListTradesSuite struct {
+ 	OrderV3Suite
+ }
+ 
++func (su *ListTradesSuite) SetupTest() {
++	su.Require().NoError(su.BaseSuiteV2.SetDBTestData("testdata/history/trades.sql"))
++	su.ClearMockCalls()
++}
++
+ func (su *ListTradesSuite) TestListTrades_Sad() {
+ 	res, err := su.ListTrades(su.Ctx, &order.ListTradesRequest_V3{
+ 		UserId: 999,
+@@ -23,12 +28,6 @@ func (su *ListTradesSuite) TestListTrades_Sad() {
+ 	})
+ 	su.Require().Error(err)
+ 	su.Nil(res)
+-	// su.AssertMsgPairLowercase(err.Error())
+-}
+-
+-func (su *ListTradesSuite) SetupTest() {
+-	su.Require().NoError(su.BaseSuiteV2.SetDBTestData("testdata/history"))
+-	su.ClearMockCalls()
+ }
+ 
+ func (su *ListTradesSuite) TestListTrades_Happy() {
+@@ -42,7 +41,5 @@ func (su *ListTradesSuite) TestListTrades_Happy() {
+ 	su.Require().NoError(err)
+ 	su.NotNil(res)
+ 	su.Len(res.Trades, 100)
+-
+ 	su.True(res.Trades[0].CreatedTimestamp > res.Trades[99].CreatedTimestamp, "order by desc")
+-
+ }
+diff --git a/pkg/db/db.go b/pkg/db/db.go
+index 3a17e6cd..691caa90 100644
+--- a/pkg/db/db.go
++++ b/pkg/db/db.go
+@@ -6,6 +6,7 @@ import (
+ 	"fmt"
+ 	"strings"
+ 	"sync"
++	"time"
+ 
+ 	_ "github.com/go-sql-driver/mysql"
+ 	"github.com/gobuffalo/pop/v5"
+@@ -13,6 +14,7 @@ import (
+ 	"github.com/pkg/errors"
+ 	"github.com/spf13/viper"
+ 	"gitlab.link24hr.com/core2.0/absol"
++	dblogger "gitlab.link24hr.com/core2.0/natu/dao/logger"
+ 	"gitlab.link24hr.com/core2.0/sunkern/pkg/util"
+ )
+ 
+@@ -136,3 +138,21 @@ func IsResultEmpty(err error) bool {
+ 	err = errors.Cause(err)
+ 	return err == sql.ErrNoRows
+ }
++
++// PopQueryAll query all data from db with pop connection
++func PopQueryAll(ctx context.Context, slave bool, models any, query string, args ...any) error {
++	log := absol.GetLogger(ctx)
++	start := time.Now()
++	popDB := GetConn()
++	if slave {
++		slavDB := GetConnSlave()
++		if slavDB == nil {
++			return errors.New("slave db is nil")
++		}
++		popDB = slavDB
++		_, ctx = log.WithField("slave", true).Attach(ctx)
++	}
++	err := popDB.RawQuery(query, args...).All(models)
++	dblogger.Print(ctx, 0, err, "", time.Since(start), query, args...)
++	return err
++}
+diff --git a/pkg/util/newrelic.go b/pkg/util/newrelic.go
+deleted file mode 100644
+index c7d86821..00000000
+--- a/pkg/util/newrelic.go
++++ /dev/null
+@@ -1 +0,0 @@
+-package util
+

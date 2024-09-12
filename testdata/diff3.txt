@@ -1,0 +1,122 @@
+diff --git a/internal/service/order/all_orders_v3.go b/internal/service/order/all_orders_v3.go
+index 3d54901c..8d95abb5 100644
+--- a/internal/service/order/all_orders_v3.go
++++ b/internal/service/order/all_orders_v3.go
+@@ -21,15 +21,14 @@ import (
+ 	"gitlab.link24hr.com/core2.0/natu/timeutil"
+ 	entity "gitlab.link24hr.com/core2.0/sunkern/internal/model"
+ 	"gitlab.link24hr.com/core2.0/sunkern/internal/service/helper"
+-
+ 	"gitlab.link24hr.com/core2.0/sunkern/pkg/db"
+ 	"google.golang.org/grpc/codes"
+ 	"google.golang.org/grpc/status"
+ )
+ 
+ const (
+-	_maxOrders   = 1000
+-	_maxDuration = 90 * 24 * time.Hour
++	maxOrdersQueryCnt = 1000
++	_maxDuration      = 90 * 24 * time.Hour
+ )
+ 
+ const (
+@@ -64,7 +63,7 @@ type AllOrdersRequest_V3Validator struct {
+ 	LowerBase       string
+ 	LowerQuote      string
+ 	ValidLimit      int32
+-	ValidOrderIDGte uint64
++	ValidOrderIDLte uint64
+ }
+ 
+ func (req *AllOrdersRequest_V3Validator) Validate(ctx context.Context) error {
+@@ -77,15 +76,22 @@ func (req *AllOrdersRequest_V3Validator) Validate(ctx context.Context) error {
+ 	locale := middleware.GetInDefault(ctx, middleware.LocaleGrpcKey, "zh-Tw")
+ 	rpcErr := config.GrpcErr.Locale(locale)
+ 
+-	req.ValidStartTime, req.ValidEndTime, err = timeutil.GetStartAndEndTime(req.StartTimestamp, req.EndTimestamp, _maxDuration)
+-	if err != nil {
+-		return rpcErr.WithMsgErrorCode(errcode.InvalidTimeStampRange, "timestamp range invalid, err:%+v", err)
++	// 如果沒有指定 OrderIDs, 則需要檢查 StartTimestamp, EndTimestamp
++	if len(req.OrderIDs) == 0 {
++		req.ValidStartTime, req.ValidEndTime, err = timeutil.GetStartAndEndTime(req.StartTimestamp, req.EndTimestamp, _maxDuration)
++		if err != nil {
++			return rpcErr.WithMsgErrorCode(errcode.InvalidTimeStampRange, "timestamp range invalid, err:%+v", err)
++		}
++	}
++	if len(req.OrderIDs) > maxOrdersQueryCnt {
++		return rpcErr.WithMsgErrorCode(errcode.InvalidOrderIDsQueryCount, "order ids count exceed limit %d", maxOrdersQueryCnt)
+ 	}
+ 
+ 	var (
+ 		stats statusAndIndex
+ 		ok    bool
+ 	)
++	// TODO: 把 status 改成 optional field 就可以用 nil 來判斷了
+ 	// api-gateway 打過來是 req.Status:-999, 代表用 statusKind 判斷
+ 	// Only allowed open orders case can ignore time limit, No include fetch all cases
+ 	isOnlyFetchOpenOrderCase := false
+@@ -122,7 +128,7 @@ func (req *AllOrdersRequest_V3Validator) Validate(ctx context.Context) error {
+ 	}
+ 
+ 	req.ValidLimit = req.Limit
+-	if req.Limit <= 0 || req.Limit > _maxOrders {
++	if req.Limit <= 0 || req.Limit > maxOrdersQueryCnt {
+ 		req.ValidLimit = 100
+ 	}
+ 
+@@ -137,8 +143,7 @@ func (req *AllOrdersRequest_V3Validator) Validate(ctx context.Context) error {
+ 			}
+ 		}
+ 	}
+-	req.ValidOrderIDGte = orderID
+-
++	req.ValidOrderIDLte = orderID
+ 	return nil
+ }
+ 
+@@ -166,6 +171,11 @@ func (o *OrderV3) AllOrders(ctx context.Context, req *order.AllOrdersRequest_V3)
+ 
+ 	// composite required where conditions
+ 	var params = []any{req.UserId}
++	// if ignore time limit, no need to pass startDec, endDec when orderIDs is not empty
++	// note: 之後如果加上只能查三個月內的訂單，這邊就沒辦法 ignore time limit 了
++	if len(validator.OrderIDs) > 0 {
++		validator.IgnoreTimeLimitEnable = true
++	}
+ 	if !validator.IgnoreTimeLimitEnable {
+ 		params = append(params, startDec, endDec)
+ 	}
+@@ -173,9 +183,13 @@ func (o *OrderV3) AllOrders(ctx context.Context, req *order.AllOrdersRequest_V3)
+ 	// composite optional where conditions
+ 	//PRO-28749 open api 拿歷史資料 id shift 問題修正
+ 	extraWhereSql := ""
+-	if validator.ValidOrderIDGte > 0 {
++	if validator.ValidOrderIDLte > 0 {
+ 		extraWhereSql += "AND id <= ? "
+-		params = append(params, validator.ValidOrderIDGte)
++		params = append(params, validator.ValidOrderIDLte)
++	}
++	if len(validator.OrderIDs) > 0 {
++		extraWhereSql += "AND id IN (?) "
++		params = append(params, validator.OrderIDs)
+ 	}
+ 	if req.ClientId > 0 {
+ 		extraWhereSql += "AND client_id = ? "
+@@ -196,14 +210,12 @@ func (o *OrderV3) AllOrders(ctx context.Context, req *order.AllOrdersRequest_V3)
+ 		sqlString = formatAllOrderSql(base, quote, stats.index, extraWhereSql, validator.IgnoreTimeLimitEnable)
+ 	}
+ 
+-	log.Debugf("%s \n %+v", sqlString, params)
+-	if err := db.GetConnSlave().RawQuery(sqlString, params...).All(&model); err != nil {
+-		// if error is force index not found, try to select agin without force index
++	if err := db.PopQueryAll(ctx, true, &model, sqlString, params...); err != nil {
++		// if error is force index not found, try to select again without force index
+ 		if me, ok := errors.Cause(err).(*mysql.MySQLError); ok && me.Number == 1176 { // index does not exist, try without index
+ 			log.WithError(err).Error("failed to query orders, index does not exists, will try without index")
+ 			sqlString = formatAllOrderSql(base, quote, "", extraWhereSql, validator.IgnoreTimeLimitEnable)
+-			if err := db.GetConnSlave().RawQuery(sqlString, params...).All(&model); err != nil {
+-				log.WithError(err).Errorf("%s \n %+v", sqlString, params)
++			if err := db.PopQueryAll(ctx, true, &model, sqlString, params...); err != nil {
+ 				return nil, rpcErr.WithMsgErrorCode(errcode.Internal, errcode.ErrorMsgPatternDB, "failed to query orders, index does not exists, will try without index: "+err.Error())
+ 			}
+ 		} else {

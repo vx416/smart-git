@@ -1,0 +1,215 @@
+diff --git a/cmd/boot/check.go b/cmd/boot/check.go
+deleted file mode 100644
+index 2b2ada70..00000000
+--- a/cmd/boot/check.go
++++ /dev/null
+@@ -1,66 +0,0 @@
+-package boot
+-
+-import (
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/db"
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/kafka"
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/logger"
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/redis"
+-)
+-
+-// CheckRedis func
+-func CheckRedis() {
+-	log := logger.Logger()
+-	if redis := redis.GetClient(); redis != nil {
+-		if ping := redis.Ping(); ping.Err() != nil {
+-			log.Panicf("Redis: %v", ping.Err())
+-		} else {
+-			log.Infof("[OK] PING Redis return %v", ping.Val())
+-		}
+-	} else {
+-		log.Panic("Redis not found")
+-	}
+-}
+-
+-// CheckDB func
+-func CheckDB() {
+-	log := logger.Logger()
+-
+-	err := db.GetConn().RawQuery("SELECT 1;").Exec()
+-	if err != nil {
+-		log.Panic(err)
+-	}
+-	err = db.GetConnSlave().RawQuery("SELECT 1;").Exec()
+-	if err != nil {
+-		log.Panic(err)
+-	}
+-
+-	err = db.GetConnSqlx().Ping()
+-	if err != nil {
+-		log.Panic(err)
+-	}
+-	err = db.GetConnSlaveSqlx().Ping()
+-	if err != nil {
+-		log.Panic(err)
+-	}
+-	log.Info("[OK] MySQL connected")
+-}
+-
+-// CheckKafka func
+-func CheckKafka() {
+-	log := logger.Logger()
+-	client := kafka.GetClient()
+-
+-	if client != nil {
+-		defer client.Close()
+-
+-		for _, broker := range client.Brokers() {
+-			if _, err := broker.Connected(); err != nil {
+-				log.Errorf("Producer Broker#%v %v: %v", broker.ID(), broker.Addr(), err)
+-			}
+-
+-			log.Infof("[OK] Producer: Broker#%v %v", broker.ID(), broker.Addr())
+-		}
+-	} else {
+-		log.Panic("Producer not found")
+-	}
+-}
+diff --git a/cmd/boot/check_test.go b/cmd/boot/check_test.go
+deleted file mode 100644
+index e86c6b30..00000000
+--- a/cmd/boot/check_test.go
++++ /dev/null
+@@ -1,9 +0,0 @@
+-package boot
+-
+-// func (su *BootSuite) TestCheck() {
+-// 	su.Require().NotPanics(func() {
+-// 		CheckDB()
+-// 		CheckRedis()
+-// 		CheckKafka()
+-// 	})
+-// }
+diff --git a/cmd/boot/exchange_rate.go b/cmd/boot/exchange_rate.go
+deleted file mode 100644
+index db515543..00000000
+--- a/cmd/boot/exchange_rate.go
++++ /dev/null
+@@ -1,74 +0,0 @@
+-package boot
+-
+-import (
+-	"fmt"
+-
+-	"github.com/buger/jsonparser"
+-
+-	"github.com/Shopify/sarama"
+-
+-	"gitlab.link24hr.com/core2.0/natu/bitoenv"
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/cache"
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/config"
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/kafka"
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/logger"
+-	"gitlab.link24hr.com/core2.0/sunkern/pkg/redis"
+-)
+-
+-// InitExchangeRate func
+-func InitExchangeRate() error {
+-	exchangeRate := redis.GetClient().HGetAll(cache.RedisExchangeRateTW).Val()
+-
+-	if len(exchangeRate) == 0 {
+-		return fmt.Errorf("%s not found", cache.RedisExchangeRateTW)
+-	}
+-
+-	for k, v := range exchangeRate {
+-		cache.SetCache(fmt.Sprintf("%s:%s", cache.RedisExchangeRateTW, k), v)
+-	}
+-
+-	return nil
+-}
+-
+-// UpdateExchangeRate func
+-func UpdateExchangeRate() {
+-	log := logger.Logger()
+-	topic := "EXCHANGE_RATE_TWD"
+-
+-	offset, _ := kafka.GetClient().GetOffset(topic, 0, sarama.OffsetNewest)
+-
+-	if offset == 0 {
+-		if config.BitoEnvContains(bitoenv.EnvProduction, bitoenv.EnvRC) {
+-			log.Panicf("Topic %s: offset is 0, please check klink cron job or kafka message", topic)
+-		}
+-		log.Errorf("Topic %s: offset is 0, please check klink cron job or kafka message", topic)
+-	}
+-	log.Infof("Topic %s: #%d", topic, offset)
+-	consumer := kafka.GetOffsetConsumer(topic, offset-1)
+-	defer func() {
+-		if consumer != nil {
+-			if err := consumer.Close(); err != nil {
+-				log.Infof("close kafka UpdateExchangeRate consumer failed error: %+v", err)
+-				return
+-			}
+-		}
+-		log.Info("close kafka UpdateExchangeRate consumer done")
+-	}()
+-	for {
+-		select {
+-		case msg := <-consumer.Messages():
+-			log.Infof("Exchange rate updated: %s", string(msg.Value))
+-
+-			err := jsonparser.ObjectEach(msg.Value, func(key []byte, value []byte, _ jsonparser.ValueType, _ int) error {
+-				cache.SetCache(fmt.Sprintf("%s:%s", cache.RedisExchangeRateTW, string(key)), string(value))
+-
+-				return nil
+-			})
+-			if err != nil {
+-				log.Errorf("json parser parse object failed, err:%+v", err)
+-			}
+-		case err := <-consumer.Errors():
+-			log.Errorf("consumer err: %+v", err)
+-		}
+-	}
+-}
+diff --git a/cmd/boot/exchange_rate_test.go b/cmd/boot/exchange_rate_test.go
+deleted file mode 100644
+index 190492a7..00000000
+--- a/cmd/boot/exchange_rate_test.go
++++ /dev/null
+@@ -1,42 +0,0 @@
+-package boot
+-
+-// type BootSuite struct {
+-// 	test.TestSuite
+-// }
+-
+-// func TestBootSuite(t *testing.T) {
+-// 	suite.Run(t, new(BootSuite))
+-// }
+-
+-// func (su *BootSuite) SetupSuite() {
+-// 	su.TestSuite.SetupSuite()
+-// 	kafka.Init()
+-// }
+-
+-// func (su *BootSuite) TestFetchExchangeRate() {
+-// 	InitExchangeRate()
+-// 	su.NotNil(cache.GetExchangeRate("TWD"))
+-// 	su.NotNil(cache.GetExchangeRate("BITO"))
+-// 	su.NotNil(cache.GetExchangeRate("ETH"))
+-// 	su.NotNil(cache.GetExchangeRate("TWDd"))
+-// 	su.NotNil(cache.GetExchangeRate("LTC"))
+-// }
+-
+-// func (su *BootSuite) TestUpdateExchangeRate() {
+-// 	go UpdateExchangeRate()
+-// 	time.Sleep(1 * time.Second)
+-// }
+-
+-// func (su *BootSuite) TestProducer() {
+-// 	producer := kafka.GetProducer()
+-// 	defer producer.Close()
+-// 	_, _, err := producer.SendMessage(&sarama.ProducerMessage{
+-// 		Topic: "EXCHANGE_RATE_TWD",
+-// 		Value: sarama.StringEncoder("{\"BCH\":\"7788\",\"BITO\":\"35140562248\",\"BTC\":\"12453145917\",\"BTG\":\"1760374832\",\"CGP\":\"137884872\",\"ETH\":\"10374832663\",\"LTC\":\"3681392235\",\"MITH\":\"23427041\",\"PANDA\":\"167336010\",\"RPC\":\"97317590\",\"SDA\":\"702811\",\"TWD\":\"3346720\",\"TWDT\":\"97443955\",\"USDT\":\"100000000\",\"XEM\":\"97326720\"}"),
+-// 	})
+-// 	su.NoError(err)
+-// }
+-
+-// func (su *BootSuite) SetupTest() {
+-
+-// }
